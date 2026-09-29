@@ -1,0 +1,4 @@
+[D-BUS Service]
+# 2026-09-27 disabled: fake_sessionmanager owns org.gnome.ScreenSaver (the gjs service would make gsd-power blank the panel on lock)
+Name=org.gnome.ScreenSaver
+Exec=/bin/false

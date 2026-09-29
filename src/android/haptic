@@ -1,0 +1,8 @@
+#!/bin/sh
+# haptic [ms] — buzz the tablet's vibration motor (Samsung sec_vibrator, legacy timed_output; 2026-09-27).
+# 1..2000 ms, default 30. Needs root (the sysfs node is system:system 0644, root writes it).
+ms=${1:-30}
+case "$ms" in ''|*[!0-9]*) echo "usage: haptic [ms]" >&2; exit 2;; esac
+[ "$ms" -gt 2000 ] && ms=2000
+[ "$ms" -lt 1 ] && exit 0
+exec sh -c "echo $ms > /sys/class/timed_output/vibrator/enable"

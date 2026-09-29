@@ -1,0 +1,36 @@
+diff --git a/hybris/common/hooks.c b/hybris/common/hooks.c
+index 67bbf31..31f1ad9 100644
+--- a/hybris/common/hooks.c
++++ b/hybris/common/hooks.c
+@@ -441,6 +441,22 @@ static int _hybris_hook_pthread_kill(pthread_t thread, int sig)
+     return pthread_kill(thread, sig);
+ }
+ 
++/* _hybris_hook_pthread_getspecific() treats key 0 as invalid (bionic never hands out 0,
++ * see its static_pthread_key_used_before_creation test), but glibc does: if a bionic
++ * library (e.g. the Mali blob's per-thread EGL state) was given glibc key 0, every
++ * getspecific returned NULL and eglGetCurrentContext()/glEGLImageTargetTexture2DOES saw no
++ * current context (NULL dereference in the driver). Never give key 0 to Android code:
++ * if glibc returns it, keep it reserved (never deleted) and create another. */
++static int _hybris_hook_pthread_key_create(pthread_key_t *key, void (*destructor)(void *))
++{
++    TRACE_HOOK("key %p destructor %p", key, destructor);
++
++    int ret = pthread_key_create(key, destructor);
++    if (ret == 0 && *key == 0)
++        ret = pthread_key_create(key, destructor);
++    return ret;
++}
++
+ static int _hybris_hook_pthread_setspecific(pthread_key_t key, const void *ptr)
+ {
+     TRACE_HOOK("key %d ptr %" PRIdPTR, key, (intptr_t) ptr);
+@@ -3088,7 +3104,7 @@ static struct _hook hooks_common[] = {
+     HOOK_DIRECT_NO_DEBUG(pthread_getname_np),
+     HOOK_INDIRECT(pthread_setname_np),
+     HOOK_DIRECT_NO_DEBUG(pthread_once),
+-    HOOK_DIRECT_NO_DEBUG(pthread_key_create),
++    HOOK_INDIRECT(pthread_key_create),
+     HOOK_DIRECT(pthread_setspecific),
+     HOOK_INDIRECT(pthread_getspecific),
+     HOOK_INDIRECT(pthread_attr_init),

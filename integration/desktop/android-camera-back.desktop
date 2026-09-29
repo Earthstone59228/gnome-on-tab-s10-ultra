@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Android Camera (back) On
+Comment=Use the tablet's back camera as a webcam in GNOME apps
+Exec=/usr/local/bin/android-camera on back
+Icon=camera-web-symbolic
+Categories=AudioVideo;Video;

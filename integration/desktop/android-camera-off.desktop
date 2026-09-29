@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Android Camera Off
+Comment=Stop sharing the tablet camera
+Exec=/usr/local/bin/android-camera off
+Icon=camera-disabled-symbolic
+Categories=AudioVideo;Video;

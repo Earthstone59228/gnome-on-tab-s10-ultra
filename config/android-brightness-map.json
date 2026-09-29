@@ -1,0 +1,70 @@
+{
+ "source": "measured 2026-09-28 on SM-X926B: Android manual brightness setting -> /sys/class/backlight/panel/brightness + dumpsys nits (doc 11 \u00a7AG)",
+ "points": [
+  {
+   "setting": 1,
+   "sysfs": 10,
+   "nits": 2.311
+  },
+  {
+   "setting": 5,
+   "sysfs": 50,
+   "nits": 4.52
+  },
+  {
+   "setting": 10,
+   "sysfs": 100,
+   "nits": 8.204
+  },
+  {
+   "setting": 20,
+   "sysfs": 200,
+   "nits": 17.276
+  },
+  {
+   "setting": 30,
+   "sysfs": 300,
+   "nits": 27.878
+  },
+  {
+   "setting": 54,
+   "sysfs": 540,
+   "nits": 57.563
+  },
+  {
+   "setting": 80,
+   "sysfs": 800,
+   "nits": 94.617
+  },
+  {
+   "setting": 110,
+   "sysfs": 1100,
+   "nits": 142.115
+  },
+  {
+   "setting": 128,
+   "sysfs": 1280,
+   "nits": 172.627
+  },
+  {
+   "setting": 160,
+   "sysfs": 1600,
+   "nits": 230.05
+  },
+  {
+   "setting": 200,
+   "sysfs": 2000,
+   "nits": 306.799
+  },
+  {
+   "setting": 230,
+   "sysfs": 2300,
+   "nits": 367.528
+  },
+  {
+   "setting": 255,
+   "sysfs": 2550,
+   "nits": 420.0
+  }
+ ]
+}

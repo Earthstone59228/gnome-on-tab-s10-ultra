@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Android Bluetooth — tiny GNOME window: Android's Bluetooth on/off + paired devices (2026-09-27)."""
+import os, sys, threading
+os.environ["GSK_RENDERER"] = "cairo"          # a two-widget window needs no GPU path
+import gi
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gtk, GLib
+sys.path.insert(0, "/usr/local/bin")
+import importlib.machinery, importlib.util
+_l = importlib.machinery.SourceFileLoader("android_bt", "/usr/local/bin/android-bt")
+_s = importlib.util.spec_from_loader("android_bt", _l); bt = importlib.util.module_from_spec(_s); _l.exec_module(bt)
+
+class Win(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="Bluetooth (Android)", default_width=420, default_height=420)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=18, margin_bottom=18,
+                      margin_start=18, margin_end=18)
+        row = Gtk.Box(spacing=12)
+        row.append(Gtk.Label(label="Bluetooth", hexpand=True, xalign=0))
+        self.sw = Gtk.Switch(sensitive=False)
+        self.sw_handler = self.sw.connect("state-set", self.toggle)
+        row.append(self.sw)
+        box.append(row)
+        box.append(Gtk.Label(label="Pair new devices in Android. Paired headphones play GNOME sound; paired "
+                                   "keyboards and mice work in GNOME.", wrap=True, xalign=0, css_classes=["dim-label"]))
+        self.list = Gtk.ListBox(css_classes=["boxed-list"], selection_mode=Gtk.SelectionMode.NONE)
+        sc = Gtk.ScrolledWindow(vexpand=True); sc.set_child(self.list); box.append(sc)
+        self.msg = Gtk.Label(xalign=0); box.append(self.msg)
+        self.set_child(box)
+        self.refresh()
+        GLib.timeout_add_seconds(5, lambda: (self.refresh(), True)[1])
+
+    def run(self, fn, done):
+        def work():
+            try: res = fn(); err = None
+            except Exception as e: res, err = None, str(e)
+            GLib.idle_add(done, res, err)
+        threading.Thread(target=work, daemon=True).start()
+
+    def refresh(self):
+        self.run(bt.status, self.show)
+
+    def show(self, res, err):
+        if err:
+            self.msg.set_text(err); return
+        state, devices = res
+        self.msg.set_text("")
+        self.sw.handler_block(self.sw_handler); self.sw.set_active(state == "on"); self.sw.set_sensitive(True)
+        self.sw.handler_unblock(self.sw_handler)
+        while (c := self.list.get_first_child()): self.list.remove(c)
+        for name, conn in devices:
+            r = Gtk.Box(spacing=8, margin_top=8, margin_bottom=8, margin_start=10, margin_end=10)
+            r.append(Gtk.Label(label=name, hexpand=True, xalign=0))
+            r.append(Gtk.Label(label="Connected" if conn else "", css_classes=["dim-label"]))
+            self.list.append(r)
+
+    def toggle(self, sw, on):
+        sw.set_sensitive(False); self.msg.set_text("Turning Bluetooth %s…" % ("on" if on else "off"))
+        self.run(lambda: bt.request("bt-on" if on else "bt-off"), lambda r, e: (self.msg.set_text(e or ""), self.refresh(), False)[-1])
+        return False
+
+app = Gtk.Application(application_id="org.fedoranative.AndroidBluetooth")
+app.connect("activate", lambda a: Win(a).present())
+app.run(None)

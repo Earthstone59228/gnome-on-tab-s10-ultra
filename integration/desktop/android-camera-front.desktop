@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Android Camera (front) On
+Comment=Use the tablet's front camera as a webcam in GNOME apps
+Exec=/usr/local/bin/android-camera on front
+Icon=camera-web-symbolic
+Categories=AudioVideo;Video;

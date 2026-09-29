@@ -1,0 +1,26 @@
+diff --git a/hybris/platforms/common/server_wlegl_buffer.cpp b/hybris/platforms/common/server_wlegl_buffer.cpp
+index 967faae..183ef5b 100644
+--- a/hybris/platforms/common/server_wlegl_buffer.cpp
++++ b/hybris/platforms/common/server_wlegl_buffer.cpp
+@@ -42,7 +42,7 @@ static const struct wl_buffer_interface server_wlegl_buffer_impl = {
+ server_wlegl_buffer *
+ server_wlegl_buffer_from(struct wl_resource *buffer)
+ {
+-	if (!buffer)
++	if (!buffer || !wl_resource_instance_of(buffer, &wl_buffer_interface, &server_wlegl_buffer_impl))
+ 		return NULL;
+ 	return static_cast<server_wlegl_buffer *>(wl_resource_get_user_data(buffer));
+ }
+diff --git a/hybris/platforms/common/server_wlegl_handle.cpp b/hybris/platforms/common/server_wlegl_handle.cpp
+index 3d3dc7b..2d88a25 100644
+--- a/hybris/platforms/common/server_wlegl_handle.cpp
++++ b/hybris/platforms/common/server_wlegl_handle.cpp
+@@ -76,7 +76,7 @@ server_wlegl_handle_dtor(struct wl_resource *resource)
+ server_wlegl_handle *
+ server_wlegl_handle_from(struct wl_resource *resource)
+ {
+-	if (!resource)
++	if (!resource || !wl_resource_instance_of(resource, &android_wlegl_handle_interface, &server_handle_impl))
+ 		return NULL;
+ 	return static_cast<server_wlegl_handle *>(wl_resource_get_user_data(resource));
+ }
