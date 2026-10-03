@@ -32,12 +32,6 @@ The source snapshot is organized by where each component runs. Files ending in `
 
 The repository captures the working sources and integration layout. Rebuilding the stock-device graphics and binder dependencies requires matching vendor libraries and a cross-build toolchain; the [deployment notes](docs/DEPLOYMENT.md) identify those requirements. Do not use a mismatched binary or firmware-specific kernel module.
 
-## Credits
-
-- [Earthstone59228](https://github.com/Earthstone59228) - device owner, testing, and direction.
-- GPT - created and published this repository.
-- Claude (Anthropic) - contributed to the development of this port.
-
 ## Source and licensing
 
 The GNOME Shell resource overlays under `integration/gnome-shell-fixes` are modifications of GNOME Shell 50.4 source and retain its GPL-2.0-or-later terms; see [`LICENSES/GPL-2.0-or-later.txt`](LICENSES/GPL-2.0-or-later.txt). Other code in this repository has no added license grant. Upstream libhybris source and proprietary vendor libraries are not included.
