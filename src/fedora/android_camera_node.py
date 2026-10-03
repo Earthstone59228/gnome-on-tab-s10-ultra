@@ -631,13 +631,13 @@ class CaptureManager:
         if self.busy:
             self.want = facing   # serialized: runs after the in-flight request completes
             return
-        self.need_stop = False   # cam-<facing> itself stops whatever was running first
         node = self.nodes[facing]
         try:
             node.ensure_pipeline()   # first: a build failure must not leave busy/active_facing set
         except Exception as e:  # noqa
             log("%s: pipeline build failed (%r) — staying idle until the next new link" % (facing, e))
             return
+        self.need_stop = False   # cam-<facing> itself stops whatever was running first
         old = self.active_facing
         self.active_facing = facing
         self.busy = True
@@ -745,7 +745,9 @@ class CaptureManager:
         self.busy = False
         self._pump()
         if self.active_facing is None and not self.busy and self.need_stop is False:
-            self._reconcile_idle()   # a consumer may have linked while the unowned capture was being stopped
+            # a consumer may have linked while the unowned capture was being stopped; go through the bounded
+            # backoff path so a persistent failure cannot loop start/stop without limit
+            self._reconcile_idle_after_unexpected_stop()
         return False
 
     def _stop_done(self, facing):

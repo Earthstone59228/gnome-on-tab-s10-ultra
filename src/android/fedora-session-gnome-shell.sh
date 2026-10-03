@@ -552,8 +552,10 @@ if ! kill -0 "$SFSENTINEL_PID" 2>/dev/null || ! runcon u:r:shell:s0 /system/bin/
 	done
 	if [ "$sfok" != 1 ]; then
 		# keep the placeholder (fail-fast names) and the phase file out of the way; the watchdog is already gone, so say so loudly
-		log "supervisor: sentinel-abort: SurfaceFlinger did NOT start after 3 attempts — placeholder (if alive) kept; manual recovery: sh $T/fedora-restore.sh (hardware fallback POWER + VOL DOWN ~10 s)"
+		log "supervisor: sentinel-abort: SurfaceFlinger did NOT start after 3 attempts — running the shared restore (it stops HWC, retakes DRM master, restarts HWC + SF); placeholder kept until SF is up"
 		rm -f "$PH"
+		sh "$T/fedora-restore.sh"
+		log "supervisor: sentinel-abort: shared restore rc=$? (sf=$(getprop init.svc.surfaceflinger)); hardware fallback POWER + VOL DOWN ~10 s"
 		exit 1
 	fi
 	kill -9 "$SFSENTINEL_PID" 2>/dev/null
