@@ -116,7 +116,8 @@ trap "" TERM INT HUP
 # runs). The run phase has no deadline (the time-box/monitor own it); a normal exit removes the file.
 PH=$T/.fedora-session-phase
 mono() { read -r _up _ </proc/uptime; echo "${_up%%.*}"; }   # monotonic seconds: immune to wall-clock steps
-phase() { echo "$1 $(( $(mono) + $2 )) $SPID" > "$PH.tmp" && mv -f "$PH.tmp" "$PH"; }
+# seconds 0 = no deadline (the run phase); anything else is a deadline that many seconds from now
+phase() { _dl=0; [ "$2" -gt 0 ] && _dl=$(( $(mono) + $2 )); echo "$1 $_dl $SPID" > "$PH.tmp" && mv -f "$PH.tmp" "$PH"; }
 phase bringup 480
 # 2026-09-26 audit #3 (daily use): the supervisor and its watchdog are the only things that bring
 # Android's display back, so the OOM killer must never pick them. oom_score_adj is INHERITED across
