@@ -267,6 +267,8 @@ static struct gbm_bo *alloc_bo(struct gbm_device *dev, uint32_t width, uint32_t 
 
 	struct gbm_bo *bo = calloc(1, sizeof(*bo));
 	if (bo == NULL) {
+		struct drm_gem_close gc = { .handle = ph.handle };   /* audit F17: release the import too */
+		ioctl(dev->fd, DRM_IOCTL_GEM_CLOSE, &gc);
 		close(dmabuf_fd);
 		return NULL;
 	}
@@ -451,6 +453,9 @@ struct gbm_surface_buffer {
 	uint64_t free_seq;   /* when the slot last became FREE; dequeue takes the oldest, so the
 	                      * buffer that just left scanout is reused last (no present fence
 	                      * on this driver tells us when the display stopped reading it) */
+	int release_fence;   /* audit F08: GPU work still pending on a FREE slot (fence of a dropped or cancelled
+	                      * buffer); handed to the producer by dequeueBuffer() so it never reuses the memory
+	                      * early. -1 if none. Closing a fence does NOT wait for it. */
 	int acquire_fence;   /* GPU-completion sync fence from queueBuffer(), -1 if none;
 	                      * waited on in gbm_surface_lock_front_buffer() before KMS may
 	                      * scan the buffer out */
@@ -666,6 +671,7 @@ static bool gbm_surface_fill_slot(struct gbm_surface *surf, struct gbm_surface_b
 	slot->queue_seq = 0;
 	slot->free_seq = 0;
 	slot->acquire_fence = -1;
+	slot->release_fence = -1;
 	slot->bo = NULL;
 	slot->surf = surf;
 	return true;
@@ -685,8 +691,31 @@ static void slot_drop_fence(struct gbm_surface_buffer *slot) {
 	}
 }
 
+/* audit F08: the slot is being freed with GPU work possibly still pending on it. Park that fence as the slot's
+ * release fence (merging with an older one is unnecessary: FREE slots are only released from DEQUEUED/QUEUED, and
+ * dequeue consumes the release fence first). Caller holds slot_lock. Takes ownership of `fence`. */
+static void slot_set_release_fence(struct gbm_surface_buffer *slot, int fence) {
+	if (slot->release_fence >= 0 && fence >= 0) {
+		/* cannot happen in the normal lifecycle; keep the newer one but do not leak the older */
+		close(slot->release_fence);
+	}
+	if (fence >= 0 || slot->release_fence < 0) {
+		slot->release_fence = fence;
+	}
+}
+
+/* audit F09: total time the compositor thread may wait for one frame's GPU fence before the frame is dropped. */
+#define FENCE_MAX_WAIT_MS 2000
+#define FENCE_SLICE_MS 250
+
+static int wait_fence_signalled(int fence, int max_ms);
+
 static void gbm_surface_free_slot(struct gbm_surface_buffer *slot) {
 	slot_drop_fence(slot);
+	if (slot->release_fence >= 0) {
+		close(slot->release_fence);
+		slot->release_fence = -1;
+	}
 	if (slot->bo != NULL) {
 		bo_free(slot->bo);
 		slot->bo = NULL;
@@ -708,14 +737,20 @@ static int anw_dequeueBuffer(struct ANativeWindow *window,
 			slot = s;
 		}
 	}
+	int rel = -1;
 	if (slot != NULL) {
 		slot->state = SLOT_DEQUEUED;
+		rel = slot->release_fence;   /* audit F08: pending GPU work from a dropped/cancelled use of this slot */
+		slot->release_fence = -1;
 	}
 	pthread_mutex_unlock(&slot_lock);
 	if (slot != NULL) {
 		*buffer = &slot->anwb;
 		if (fenceFd) {
-			*fenceFd = -1; /* a FREE slot is off screen (released after its flip) */
+			*fenceFd = rel; /* the producer waits on it and closes it; -1 when the slot is idle */
+		} else if (rel >= 0) {
+			(void)wait_fence_signalled(rel, FENCE_MAX_WAIT_MS); /* deprecated entry point cannot carry a fence */
+			close(rel);
 		}
 		return 0;
 	}
@@ -782,12 +817,12 @@ static int anw_cancelBuffer(struct ANativeWindow *window,
 		LOG("anw_cancelBuffer: unknown buffer %p\n", (void *)buffer);
 		return -EINVAL;
 	}
-	if (fenceFd >= 0) {
-		close(fenceFd);
-	}
 	pthread_mutex_lock(&slot_lock);
 	if (slot->state == SLOT_DEQUEUED) {
+		slot_set_release_fence(slot, fenceFd);   /* audit F08: cancelled work may still be in flight */
 		slot_set_free(slot);
+	} else if (fenceFd >= 0) {
+		close(fenceFd);
 	}
 	pthread_mutex_unlock(&slot_lock);
 	return 0;
@@ -954,25 +989,31 @@ static int find_real_dmabuf_fd(const native_handle_t *handle) {
 	return best_fd; /* -1 if every fd was zero-size / fstat failed on all of them */
 }
 
-/* Blocks until the GPU has finished writing the buffer, so KMS never scans out a
- * half-drawn frame. Measured 1–3 ms per frame on 2026-09-25; only failures are logged.
- * Takes ownership of (and closes) the fence fd; called WITHOUT slot_lock held. */
-static void wait_and_close_fence(int fence) {
-	if (fence < 0) {
-		return;
-	}
+/* Waits (without closing) until the sync fence signals. Returns 1 = signalled, 0 = still pending after
+ * max_ms, -1 = the fd reports an error condition (POLLERR/POLLNVAL) or poll failed. */
+static int wait_fence_signalled(int fence, int max_ms) {
 	struct pollfd pfd = { .fd = fence, .events = POLLIN };
-	int pr;
-	do {
-		pr = poll(&pfd, 1, 250); /* sync_file fds report POLLIN once signaled */
-	} while (pr < 0 && errno == EINTR);
-	if (pr <= 0) {
-		static unsigned long failures;
-		if (__atomic_fetch_add(&failures, 1, __ATOMIC_RELAXED) < 10) {
-			LOG("fence wait failed/timed out (pr=%d errno=%d), scanning out anyway\n", pr, errno);
+	for (int waited = 0; waited < max_ms; waited += FENCE_SLICE_MS) {
+		int pr;
+		pfd.revents = 0;
+		do {
+			pr = poll(&pfd, 1, FENCE_SLICE_MS); /* sync_file fds report POLLIN once signaled */
+		} while (pr < 0 && errno == EINTR);
+		if (pr < 0) {
+			return -1;
+		}
+		if (pr > 0) {
+			if (pfd.revents & (POLLERR | POLLNVAL)) {
+				return -1;
+			}
+			if (pfd.revents & POLLIN) {
+				return 1;
+			}
+			/* POLLHUP alone: a sync_file never does this; treat as failure rather than "done" */
+			return -1;
 		}
 	}
-	close(fence);
+	return 0;
 }
 
 /* Imports the slot's dma-buf on the KMS fd once and keeps the bo for the slot's
@@ -1049,7 +1090,9 @@ struct gbm_bo *gbm_surface_lock_front_buffer(struct gbm_surface *surface) {
 	for (int i = 0; i < GBM_SURFACE_NUM_BUFFERS; i++) {
 		struct gbm_surface_buffer *s = &surface->buffers[i];
 		if (s != slot && s->state == SLOT_QUEUED) {
-			slot_drop_fence(s);
+			/* audit F08: its GPU work may still be running — the fence moves to the release side */
+			slot_set_release_fence(s, s->acquire_fence);
+			s->acquire_fence = -1;
 			slot_set_free(s);
 		}
 	}
@@ -1068,7 +1111,27 @@ struct gbm_bo *gbm_surface_lock_front_buffer(struct gbm_surface *surface) {
 		pthread_mutex_unlock(&slot_lock);
 		return NULL;
 	}
-	wait_and_close_fence(fence);
+	if (fence >= 0) {
+		int w = wait_fence_signalled(fence, FENCE_MAX_WAIT_MS);
+		if (w == 1) {
+			close(fence);
+		} else {
+			/* audit F09: never scan out a frame the GPU has not finished. Drop it: the fence follows the slot
+			 * to the release side (the producer waits on it before reusing the memory) and the caller keeps
+			 * showing the previous frame. */
+			static unsigned long failures;
+			if (__atomic_fetch_add(&failures, 1, __ATOMIC_RELAXED) < 10) {
+				LOG("fence %s after %d ms — dropping this frame instead of scanning it out\n",
+					w < 0 ? "reports an error" : "still pending", FENCE_MAX_WAIT_MS);
+			}
+			pthread_mutex_lock(&slot_lock);
+			slot_set_release_fence(slot, fence);
+			slot_set_free(slot);
+			pthread_mutex_unlock(&slot_lock);
+			errno = EAGAIN;
+			return NULL;
+		}
+	}
 	return bo;
 }
 

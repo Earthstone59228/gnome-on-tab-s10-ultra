@@ -15,9 +15,10 @@
 #   6. start surfaceflinger (runcon), poll running <=15s
 #   7. stop bootanim (runcon) — SF start always drags it in
 #
-# Exit 0 = fully restored. Exit 1 = aborted before touching HWC/SF (device
-# left in whatever state it was — safe to retry or reboot). Never exits
-# non-zero AFTER starting HWC, since bootanim-clear failure is not fatal.
+# Exit 0 = fully restored (real SurfaceFlinger confirmed running). Exit 1 = aborted before touching
+# HWC/SF, OR HWC/SF failed to come up (device left in whatever state it was — safe to retry or reboot).
+# On a failed SF start the sfsentinel placeholder, wake lock and Android-settings snapshot are KEPT so a
+# retry still has its fallback (audit F03). A failed bootanim-clear is not fatal.
 
 R=/data/fedora
 T=/data/local/tmp
@@ -80,9 +81,11 @@ sweep_session_domain() {
 	return $hit
 }
 
+# NOTE (audit F01): this function must NOT touch the variables of the master-free loop below (it used to
+# share "round" with it and reset the escalation counter on every call) — keep its counter private.
 kill_compositors() {
-	round=0
-	while [ "$round" -lt 5 ]; do
+	kc_round=0
+	while [ "$kc_round" -lt 5 ]; do
 		any=0
 	for p in firefox ffmpeg wireplumber pipewire-pulse pipewire parec pacat NetworkManager wpa_supplicant iio-sensor-proxy upowerd seatd gnome-shell gnome-shell-bin mutter labwc foot udevd python3 dbus-daemon; do
 			chroot_kill "$p"
@@ -92,7 +95,7 @@ kill_compositors() {
 		done
 		sweep_session_domain && any=1
 		[ "$any" = 0 ] && return 0
-		round=$((round + 1))
+		kc_round=$((kc_round + 1))
 		sleep 1
 	done
 	log "kill_compositors: gave up after 5 rounds — survivors may remain, proceeding to master check anyway"
@@ -171,10 +174,13 @@ kill_card_holders() {
 }
 
 # F11: master-free check. Never touch HWC/SF while master is held.
+# Monotonic seconds (CLOCK_BOOTTIME-ish /proc/uptime), immune to wall-clock steps.
+mono() { read -r _up _ </proc/uptime; echo "${_up%%.*}"; }
 master_free=0
 round=0
 total=0
-while [ "$round" -lt 4 ]; do
+master_deadline=$(( $(mono) + 240 ))   # hard cap independent of the round counter (audit F01)
+while [ "$round" -lt 4 ] && [ "$(mono)" -lt "$master_deadline" ]; do
 	elapsed=0
 	while [ "$elapsed" -lt 15 ]; do
 		if chroot "$R" /usr/local/bin/mastercheck >>"$LOG" 2>&1; then
@@ -188,12 +194,13 @@ while [ "$round" -lt 4 ]; do
 	[ "$master_free" = 1 ] && break
 	round=$((round + 1))
 	[ "$round" -lt 4 ] || break
+	[ "$(mono)" -lt "$master_deadline" ] || break
 	log "master still held after ${total}s — escalation round $round: kill chroot card0 holders + compositors"
 	kill_card_holders
 	kill_compositors
 done
 if [ "$master_free" != 1 ]; then
-	log "ABORT: master held after ${total}s and 3 escalation rounds. HWC/SF NOT started. (The supervisor retries" \
+	log "ABORT: master held after ${total}s and $((round - 1)) escalation round(s). HWC/SF NOT started. (The supervisor retries" \
 		"this restore; hardware fallback: hold POWER + VOLUME DOWN ~10 s to force-restart the tablet.)"
 	echo "restore ABORTED: DRM master held — see $LOG; force-restart = POWER + VOL DOWN ~10 s" >&2
 	exit 1
@@ -242,7 +249,12 @@ done
 if [ "$sf_up" = 1 ]; then
 	log "surfaceflinger running (${elapsed}s)"
 else
-	log "WARNING: surfaceflinger not confirmed running after ${elapsed}s — clearing bootanim anyway, check device"
+	# audit F03: do NOT dismiss the sfsentinel placeholder, release the wake lock or restore settings, and do
+	# NOT report success — the supervisor retries (each retry restarts HWC/SF), and the placeholder keeps
+	# system_server from wedging on the missing SurfaceFlinger names meanwhile.
+	log "ABORT: surfaceflinger not running after ${elapsed}s (state=$(getprop init.svc.surfaceflinger)) — sfsentinel placeholder, wake lock and settings snapshot KEPT; rc=1 so the caller retries"
+	echo "restore INCOMPLETE: surfaceflinger did not start — see $LOG; force-restart = POWER + VOL DOWN ~10 s" >&2
+	exit 1
 fi
 
 # SfSentinel handoff (2026-09-20 root-loss fix): while SF was stopped, the

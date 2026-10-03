@@ -52,11 +52,25 @@ save)
 			exit 1
 		fi
 	fi
-	s put system screen_brightness_mode 0
-	s put system screen_off_timeout 2147483647
-	s put system accelerometer_rotation 0
-	s put global hide_error_dialogs 1
-	log "session values set: brightness_mode=$(s get system screen_brightness_mode) screen_off_timeout=$(s get system screen_off_timeout) accelerometer_rotation=$(s get system accelerometer_rotation) hide_error_dialogs=$(s get global hide_error_dialogs)"
+	# audit F05: every put is checked, and the values are read back; a value that did not stick fails the save
+	# (rc=1) so the supervisor aborts before SurfaceFlinger is touched and restores the snapshot.
+	ok=1
+	for kv in "system screen_brightness_mode 0" "system screen_off_timeout 2147483647" \
+			"system accelerometer_rotation 0" "global hide_error_dialogs 1"; do
+		set -- $kv
+		s put "$1" "$2" "$3" >/dev/null
+		now=$(s get "$1" "$2")
+		if [ "$now" != "$3" ]; then
+			s put "$1" "$2" "$3" >/dev/null   # one retry; framework may have been busy
+			now=$(s get "$1" "$2")
+		fi
+		[ "$now" = "$3" ] || { ok=0; log "session value $1 $2: wanted '$3', reads '$now'"; }
+	done
+	if [ "$ok" != 1 ]; then
+		log "session values NOT applied — failing save so the supervisor aborts (snapshot kept for restore)"
+		exit 1
+	fi
+	log "session values set and verified: brightness_mode=$(s get system screen_brightness_mode) screen_off_timeout=$(s get system screen_off_timeout) accelerometer_rotation=$(s get system accelerometer_rotation) hide_error_dialogs=$(s get global hide_error_dialogs)"
 	;;
 restore)
 	[ -f "$F" ] || exit 0

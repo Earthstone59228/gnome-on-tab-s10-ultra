@@ -277,8 +277,12 @@ class Service:
             self.pending = None
         if first:
             log("Android Bluetooth state %s, %d paired device(s)" % (state, len(devs)))
-        if not first and (self.powered != old_powered or self.power_state != old_ps):
-            log("Android Bluetooth state -> %s" % state)
+        # audit F16: also announce the FIRST snapshot. Until it arrives the interface exposes state=None
+        # (Powered=false, PowerState=off, airplane-mode=true); clients that cached those values must be told when
+        # the first real reply differs, not only on later changes.
+        if self.powered != old_powered or self.power_state != old_ps:
+            if not first:
+                log("Android Bluetooth state -> %s" % state)
             self.props_changed(self.sys_conn, ADAPTER, "org.bluez.Adapter1",
                                {"Powered": GLib.Variant("b", self.powered),
                                 "PowerState": GLib.Variant("s", self.power_state)})

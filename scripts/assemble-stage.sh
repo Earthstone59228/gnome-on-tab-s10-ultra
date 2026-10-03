@@ -61,8 +61,15 @@ cp -a "$repo/integration/gnome-shell-fixes/." \
   "$stage/fedora/usr/local/share/gnome-shell-fixes/"
 cp -a "$repo/integration/screen-blank@fedora-tab" \
   "$stage/fedora/usr/local/share/gnome-shell/extensions/"
-cp -p "$repo"/integration/desktop/*.desktop \
-  "$stage/fedora/usr/local/share/applications/"
+# audit F19: the automatic android_camera_node.py daemon owns the Android camera (same bridge, scrcpy id and socket);
+# the manual front/back/off launchers would interrupt or fight it, so they are not staged unless explicitly asked.
+for desktop in "$repo"/integration/desktop/*.desktop; do
+  case "${desktop##*/}" in
+    android-camera-*.desktop)
+      [ "${STAGE_MANUAL_CAMERA_LAUNCHERS:-0}" = 1 ] || continue ;;
+  esac
+  cp -p "$desktop" "$stage/fedora/usr/local/share/applications/"
+done
 cp -p "$repo/integration/org.gnome.ScreenSaver.service" \
   "$stage/fedora/usr/share/dbus-1/services/"
 

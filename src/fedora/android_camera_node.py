@@ -99,6 +99,10 @@ SOCK_CONNECT_RETRIES = 40          # matches android-camera's feed(): 40 * 0.25s
 SOCK_CONNECT_DELAY_S = 0.25
 UNEXPECTED_STOP_RETRY_DELAY_S = float(os.environ.get("ANDROID_CAMERA_NODE_RETRY_DELAY_S", "2"))
 MAX_UNEXPECTED_RETRIES = 5
+APPSRC_MAX_BYTES = 4 << 20         # encoded input queued in front of the decoder (audit F13); the reader gates on enough-data
+APPSRC_STALL_S = 3.0               # decoder not draining for this long -> end the capture so it restarts clean
+MAX_PENDING_AU_BYTES = 4 << 20     # one pending access unit larger than this is malformed (audit F14)
+FLIP_FLAG = "/usr/local/etc/android-camera-flip-%s"   # opt-in horizontal flip per facing (audit U02, default off)
 
 WIDTH, HEIGHT, FPS_NUM, FPS_DEN = 1280, 720, 30, 1
 CAPS_STR = "video/x-raw,format=I420,width=%d,height=%d,framerate=%d/%d" % (WIDTH, HEIGHT, FPS_NUM, FPS_DEN)
@@ -154,6 +158,10 @@ class CameraNode:
         self._reader_thread = None
         self._reader_stop = None
         self._reader_sock = None
+        self._reader_gen = 0        # bumped on every start/stop so a late _reader_ended from an old reader is ignored
+        self._enough = threading.Event()   # set by appsrc enough-data, cleared by need-data (audit F13)
+        self._bus = None
+        self._bus_ids = []
 
     # ---- pipeline lifecycle -------------------------------------------------------------------------
     def ensure_pipeline(self):
@@ -190,6 +198,13 @@ class CameraNode:
         # do-timestamp stamps every frame. Before, arbitrary 64 KiB socket chunks were stamped and only ~8 of the
         # camera's ~27 fps came out of the decoder (measured live). alignment=au tells h264parse it is aligned.
         appsrc.set_property("caps", Gst.Caps.from_string("video/x-h264,stream-format=byte-stream,alignment=au"))
+        # audit F13: appsrc's max-bytes is only a signal threshold in non-blocking mode. Raise it to a sane bound and
+        # let the reader thread gate on enough-data/need-data instead of pushing blindly (H.264 reference data is
+        # never dropped; a decoder that stops draining ends the capture, see start_reader()).
+        appsrc.set_property("max-bytes", APPSRC_MAX_BYTES)
+        self._enough.clear()
+        appsrc.connect("enough-data", lambda _src: self._enough.set())
+        appsrc.connect("need-data", lambda _src, _n: self._enough.clear())
         h264parse = make("h264parse")
         dec = make("openh264dec")
         # Hard rule (doc 11 §Y): leaky queue AFTER the decoder, never before — see module docstring SAFETY.
@@ -199,6 +214,11 @@ class CameraNode:
         queue.set_property("max-size-bytes", 0)
         queue.set_property("max-size-time", 0)
         conv = make("videoconvert")
+        flip = None
+        if os.path.exists(FLIP_FLAG % self.facing):
+            flip = make("videoflip", "mirror-fix")
+            flip.set_property("method", "horizontal-flip")
+            log("%s: horizontal flip ENABLED by %s" % (self.facing, FLIP_FLAG % self.facing))
         scale = make("videoscale")
         rate = make("videorate")
         # 2026-09-28 (doc 11 §AC): without these, videorate filled every gap with duplicates — from the segment start
@@ -212,7 +232,11 @@ class CameraNode:
         h264parse.link(dec)
         dec.link(queue)
         queue.link(conv)
-        conv.link(scale)
+        if flip is not None:
+            conv.link(flip)
+            flip.link(scale)
+        else:
+            conv.link(scale)
         scale.link(rate)
         rate.link(cam_caps)
 
@@ -247,10 +271,13 @@ class CameraNode:
         self._probe_id = probe_pad.add_probe(Gst.PadProbeType.BUFFER, self._on_first_decoded_frame)
         self._probe_pad = probe_pad
 
+        # audit F12: remember the watch and handler ids so teardown() can remove them; the handlers also carry the
+        # pipeline they belong to and ignore messages from a pipeline that is no longer current.
         bus = pipeline.get_bus()
         bus.add_signal_watch()
-        bus.connect("message::error", self._on_bus_error)
-        bus.connect("message::eos", self._on_bus_eos)
+        self._bus = bus
+        self._bus_ids = [bus.connect("message::error", self._on_bus_error, pipeline),
+                         bus.connect("message::eos", self._on_bus_eos, pipeline)]
 
         self.pipeline = pipeline
         self.sel = sel
@@ -321,16 +348,35 @@ class CameraNode:
         self.stop_reader()
         if self.pipeline is not None:
             self.pipeline.set_state(Gst.State.NULL)
+        if self._bus is not None:
+            for hid in self._bus_ids:
+                try:
+                    self._bus.disconnect(hid)
+                except Exception:  # noqa
+                    pass
+            self._bus.remove_signal_watch()
+        self._bus = None
+        self._bus_ids = []
+        if self._probe_id is not None and self._probe_pad is not None:
+            try:
+                self._probe_pad.remove_probe(self._probe_id)
+            except Exception:  # noqa
+                pass
+        self._probe_pad = None
         self.pipeline = None
         self.sel = self.black_pad = self.cam_pad = self.appsrc = None
         self._probe_id = None
 
-    def _on_bus_error(self, bus, msg):
+    def _on_bus_error(self, bus, msg, pipeline=None):
+        if pipeline is not None and pipeline is not self.pipeline:
+            return   # stale message from a torn-down pipeline
         err, dbg = msg.parse_error()
         log("%s: GStreamer ERROR: %s (%s) — tearing down and rebuilding" % (self.facing, err, dbg))
         self.on_crash()
 
-    def _on_bus_eos(self, bus, msg):
+    def _on_bus_eos(self, bus, msg, pipeline=None):
+        if pipeline is not None and pipeline is not self.pipeline:
+            return
         log("%s: unexpected EOS — tearing down and rebuilding" % self.facing)
         self.on_crash()
 
@@ -346,6 +392,10 @@ class CameraNode:
         self._arm_first_frame_probe()
         stop = threading.Event()
         self._reader_stop = stop
+        self._reader_gen += 1
+        gen = self._reader_gen
+        enough = self._enough
+        enough.clear()
         appsrc = self.appsrc
 
         def run():
@@ -364,7 +414,7 @@ class CameraNode:
                         time.sleep(SOCK_CONNECT_DELAY_S)
                 else:
                     log("%s: camera socket did not come up" % self.facing)
-                    GLib.idle_add(self._reader_ended, "socket did not come up")
+                    GLib.idle_add(self._reader_ended, "socket did not come up", gen)
                     return
                 self._reader_sock = sock
                 splitter = AccessUnitSplitter()
@@ -380,10 +430,24 @@ class CameraNode:
                         log("%s: camera socket EOF" % self.facing)
                         break
                     ret = Gst.FlowReturn.OK
+                    stalled = False
                     for au in splitter.feed(data):
+                        # audit F13: bounded ingestion. Wait while appsrc says enough-data; a decoder that does not
+                        # drain for APPSRC_STALL_S ends this capture (it restarts through the normal retry path).
+                        t0 = time.monotonic()
+                        while enough.is_set() and not stop.is_set():
+                            if time.monotonic() - t0 > APPSRC_STALL_S:
+                                stalled = True
+                                break
+                            time.sleep(0.01)
+                        if stalled or stop.is_set():
+                            break
                         ret = appsrc.push_buffer(Gst.Buffer.new_wrapped(au))
                         if ret != Gst.FlowReturn.OK:
                             break
+                    if stalled:
+                        log("%s: decoder not draining for %.0f s (appsrc full) — ending capture" % (self.facing, APPSRC_STALL_S))
+                        break
                     if ret != Gst.FlowReturn.OK:
                         log("%s: appsrc push-buffer -> %s" % (self.facing, ret))
                         break
@@ -394,13 +458,15 @@ class CameraNode:
                     except OSError:
                         pass
                 if not stop.is_set():
-                    GLib.idle_add(self._reader_ended, "stream ended")
+                    GLib.idle_add(self._reader_ended, "stream ended", gen)
 
         t = threading.Thread(target=run, name="camnode-reader-" + self.facing, daemon=True)
         self._reader_thread = t
         t.start()
 
-    def _reader_ended(self, reason):
+    def _reader_ended(self, reason, gen=None):
+        if gen is not None and gen != self._reader_gen:
+            return False   # a reader that was already replaced/stopped (audit F11)
         self.go_black()
         if MANAGER is not None:
             MANAGER.on_reader_ended(self.facing, reason)
@@ -412,6 +478,7 @@ class CameraNode:
         # "Bad file descriptor" OSError there. The reader thread's recv() has a 0.5s timeout specifically so
         # it notices `stop` promptly on its own and closes its own socket in its own `finally` — a plain
         # single-writer-per-fd rule, not a cosmetic choice.
+        self._reader_gen += 1
         if self._reader_stop is not None:
             self._reader_stop.set()
         self._reader_sock = None
@@ -466,6 +533,14 @@ class AccessUnitSplitter:
         elif self.au_start is None and len(b) > (1 << 20):
             b.clear()                          # garbage with no start code at all: never grow unbounded
             self.scan = 0
+        if len(b) > MAX_PENDING_AU_BYTES:
+            # audit F14: a synchronised stream that never shows the next access-unit boundary. Drop the malformed
+            # pending data and resynchronise on the next start code (the decoder recovers at the next IDR).
+            log("splitter: pending access unit exceeded %d bytes — resynchronising" % MAX_PENDING_AU_BYTES)
+            b.clear()
+            self.scan = 0
+            self.au_start = None
+            self.has_slice = False
         return out
 
 
@@ -477,7 +552,9 @@ class CaptureManager:
     def __init__(self, nodes):
         self.nodes = nodes
         self.active_facing = None
-        self.busy = False
+        self.busy = False             # exactly one bridge request is in flight while True (audit F10/F11: never cleared elsewhere)
+        self.want = None              # facing requested while busy; served by _pump() when the in-flight request completes
+        self.need_stop = False        # Android's camera may be running with no owner: send cam-stop (serialized) when idle
         self.unexpected_retries = 0   # consecutive unexpected-stop retries (bounded, see below)
         self.grace_id = None
         self.grace_facing = None
@@ -505,8 +582,8 @@ class CaptureManager:
     def on_pipeline_crashed(self, facing):
         if self.active_facing == facing:
             self.active_facing = None
-            self.busy = False
-            self._issue_bridge_stop_fire_and_forget()
+            self.need_stop = True   # serialized cam-stop (never overlaps an in-flight request; audit F11)
+            self._pump()
         self._reconcile_idle_after_unexpected_stop()
 
     def _reconcile_idle_after_unexpected_stop(self):
@@ -532,7 +609,23 @@ class CaptureManager:
         return False
 
     # ---- internal: start / stop / switch ------------------------------------------------------------
+    def _pump(self):
+        """Run the next queued bridge operation. Only acts when no request is in flight (audit F11)."""
+        if self.busy:
+            return
+        w, self.want = self.want, None
+        if w is not None and w != self.active_facing and self.nodes[w].link_count > 0:
+            self._request_facing(w)
+            return
+        if self.need_stop and self.active_facing is None:
+            self.need_stop = False
+            self._bridge_stop_serialized()
+
     def _request_facing(self, facing):
+        if self.busy:
+            self.want = facing   # serialized: runs after the in-flight request completes
+            return
+        self.need_stop = False   # cam-<facing> itself stops whatever was running first
         old = self.active_facing
         self.active_facing = facing
         self.busy = True
@@ -556,18 +649,34 @@ class CaptureManager:
 
     def _start_done(self, facing, reply, err):
         self.busy = False
+        ok = err is None and reply == "ok"
         if self.active_facing != facing:
-            return False  # superseded by another request while the bridge call was in flight
-        if err is not None or reply != "ok":
+            # superseded or the pipeline crashed while the bridge call was in flight. If it succeeded and nobody
+            # owns the camera now, Android's capture is running unowned: stop it (serialized).
+            if ok and self.active_facing is None:
+                self.need_stop = True
+            self._pump()
+            return False
+        if not ok:
             log("%s: bridge cam-%s failed (%s) — staying on black, will retry on the next new link"
                 % (facing, facing, err or reply))
             self.active_facing = None
             self.nodes[facing].go_black()
             # audit fix 2026-09-28: a timed-out request may still be processed by the bridge later, so make
             # sure Android's camera is not left running while we believe it is off
-            self._issue_bridge_stop_fire_and_forget()
+            self.need_stop = True
+            self._pump()
+            return False
+        w = self.want
+        if w is not None and w != facing and self.nodes[w].link_count > 0:
+            self._pump()   # another facing is already waiting: switch without starting a reader for this one
             return False
         self.nodes[facing].start_reader()
+        # audit F10: every consumer may have left while the bridge call was in flight (a grace timer that fired
+        # meanwhile found us busy). Re-arm the grace stop so the capture does not run unowned.
+        if self.nodes[facing].link_count == 0 and self.grace_id is None:
+            self._start_grace(facing)
+        self._pump()
         return False
 
     def _start_grace(self, facing):
@@ -586,7 +695,10 @@ class CaptureManager:
         self.grace_id = None
         self.grace_facing = None
         if facing == self.active_facing and self.nodes[facing].link_count == 0:
-            self._begin_stop(facing)
+            if self.busy:
+                self._start_grace(facing)   # audit F10: do not lose the stop while a bridge call is in flight
+            else:
+                self._begin_stop(facing)
         return False
 
     def _begin_stop(self, facing):
@@ -607,19 +719,28 @@ class CaptureManager:
 
         threading.Thread(target=worker, name="camnode-bridge-stop", daemon=True).start()
 
-    def _issue_bridge_stop_fire_and_forget(self):
+    def _bridge_stop_serialized(self):
+        self.busy = True
+
         def worker():
             try:
                 if BRIDGE is not None:
                     BRIDGE.request("cam-stop", timeout=BRIDGE_TIMEOUT_S)
             except Exception as e:  # noqa
                 log("cam-stop error (ignored): %r" % e)
-        threading.Thread(target=worker, name="camnode-bridge-stop-crash", daemon=True).start()
+            GLib.idle_add(self._aux_stop_done)
+        threading.Thread(target=worker, name="camnode-bridge-stop-aux", daemon=True).start()
+
+    def _aux_stop_done(self):
+        self.busy = False
+        self._pump()
+        return False
 
     def _stop_done(self, facing):
         self.busy = False
         if self.active_facing == facing:
             self.active_facing = None
+        self._pump()
         self._reconcile_idle()
         return False
 

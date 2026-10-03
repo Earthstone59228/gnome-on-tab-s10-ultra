@@ -93,6 +93,13 @@ if [ "$1" != "sup" ]; then
 	if [ ! -f "$T/fedora-android-settings.sh" ]; then
 		log "prereq: fedora-android-settings.sh missing — aborting (SF untouched)"; echo "prereq fail: fedora-android-settings.sh"; exit 1
 	fi
+	# audit F04: everything the recovery path needs must exist BEFORE SurfaceFlinger is ever stopped
+	if [ ! -x "$R/usr/local/bin/mastercheck" ]; then
+		log "prereq: $R/usr/local/bin/mastercheck missing/not executable (restore cannot test DRM master) — aborting (SF untouched)"; echo "prereq fail: mastercheck"; exit 1
+	fi
+	if [ ! -x "$T/sfsentinel" ]; then
+		log "prereq: $T/sfsentinel missing/not executable (no SurfaceFlinger placeholder) — aborting (SF untouched)"; echo "prereq fail: sfsentinel"; exit 1
+	fi
 	kill_compositors
 	setsid nohup sh "$0" sup "$MINS" </dev/null > "$T/fedora-supervisor-gnome-shell.log" 2>&1 &
 	echo "gnome-shell session started: time-box ${MINS}m, supervisor pid $!"
@@ -104,6 +111,12 @@ fi
 MINS=$2
 SPID=$$
 trap "" TERM INT HUP
+# audit F07: phase file "<name> <deadline-epoch|0>". The watchdog below treats a LIVE supervisor that is still in a
+# bring-up phase past its deadline as hung: it kills it and runs the shared restore itself (so exactly one restorer
+# runs). The run phase has no deadline (the time-box/monitor own it); a normal exit removes the file.
+PH=$T/.fedora-session-phase
+phase() { echo "$1 $(( $(date +%s) + $2 ))" > "$PH.tmp" && mv -f "$PH.tmp" "$PH"; }
+phase bringup 480
 # 2026-09-26 audit #3 (daily use): the supervisor and its watchdog are the only things that bring
 # Android's display back, so the OOM killer must never pick them. oom_score_adj is INHERITED across
 # fork/exec, so the supervisor protects itself only AFTER the runner is forked (see below) — the GNOME
@@ -112,7 +125,7 @@ log "supervisor: start (pid $SPID, time-box ${MINS}m, gnome-shell --wayland --no
 
 setsid nohup sh -c '
 	trap - TERM
-	HB="'"$HB"'"; LOG="'"$LOG"'"; SPID='"$SPID"'
+	HB="'"$HB"'"; LOG="'"$LOG"'"; SPID='"$SPID"'; PH="'"$PH"'"
 	echo -1000 > /proc/$$/oom_score_adj 2>/dev/null
 	stale=0
 	wn=0
@@ -139,11 +152,31 @@ setsid nohup sh -c '
 		NOW=$(date +%s)
 		HB_T=$(stat -c %Y "$HB" 2>/dev/null || echo 0)
 		if [ $((NOW - HB_T)) -gt 20 ]; then stale=$((stale + 1)); else stale=0; fi
-		if [ "$stale" -ge 2 ] && ! kill -0 "$SPID" 2>/dev/null; then
+		sdead=0
+		kill -0 "$SPID" 2>/dev/null || sdead=1
+		if [ "$sdead" = 0 ] && [ -f "$PH" ]; then
+			pname=""; pdl=0
+			read -r pname pdl < "$PH" 2>/dev/null
+			case "$pdl" in ""|*[!0-9]*) pdl=0;; esac
+			if [ "$pdl" -gt 0 ] && [ "$NOW" -gt "$pdl" ]; then
+				echo "$(date) watchdog: supervisor $SPID still in phase $pname $((NOW - pdl))s past its deadline — killing it, restore follows" >> "$LOG"
+				kill -9 "$SPID" 2>/dev/null
+				sleep 1
+				sdead=1; stale=2
+			fi
+		fi
+		if [ "$stale" -ge 2 ] && [ "$sdead" = 1 ]; then
 			echo "$(date) watchdog: heartbeat stale x2 + supervisor $SPID dead — invoking shared restore" >> "$LOG"
 			sh "'"$T"'"/fedora-restore.sh
-			echo "$(date) watchdog: restore invocation returned rc=$? (re-armed)" >> "$LOG"
+			wrc=$?
+			echo "$(date) watchdog: restore invocation returned rc=$wrc" >> "$LOG"
 			stale=0
+			if [ "$wrc" = 0 ]; then
+				rm -f "$PH"
+				echo "$(date) watchdog: restore succeeded — watchdog done" >> "$LOG"
+				exit 0
+			fi
+			echo "$(date) watchdog: restore failed — re-armed" >> "$LOG"
 		fi
 	done
 ' </dev/null >/dev/null 2>&1 &
@@ -153,6 +186,21 @@ WPID=$!
 # `runcon_shell svc power stayon true` actually ran `svc power` alone and the
 # stay-awake setting was never applied by the script. Forward everything.
 runcon_shell() { _c=$1; shift; runcon u:r:shell:s0 /system/bin/"$_c" "$@"; }
+
+# audit F05/F06: abort BEFORE SurfaceFlinger is stopped and unwind whatever bring-up already did (all of it is safe
+# while SF is still up). Every variable is optional; the ones not set yet are simply empty.
+abort_before_sf() {
+	log "supervisor: ABORT — $1; SurfaceFlinger NOT stopped, unwinding"
+	[ -n "$AWPID" ] && kill -9 "$AWPID" 2>/dev/null
+	[ -n "$IHON" ] && { sh "$T/input-hide.sh" off; IHON=""; }
+	[ -n "$PGPID" ] && { kill "$PGPID" 2>/dev/null; sleep 1; kill -9 "$PGPID" 2>/dev/null; PGPID=""; }
+	runcon u:r:shell:s0 /system/bin/cmd power set-wakelock release FULL_WAKE_LOCK >/dev/null 2>&1
+	runcon u:r:shell:s0 /system/bin/cmd power suppress-ambient-display fedora-session false >/dev/null 2>&1
+	sh "$T/fedora-android-settings.sh" restore
+	kill -9 "$WPID" 2>/dev/null
+	rm -f "$PH"
+	exit 1
+}
 
 # 2026-09-21 incident fix (19:48:09 rescueparty_by_bootchecker reboot ~76s into
 # a healthy session, decoded from /data/log/rescueparty_log): Android's
@@ -173,7 +221,7 @@ runcon_shell() { _c=$1; shift; runcon u:r:shell:s0 /system/bin/"$_c" "$@"; }
 # fedora-restore.sh). Android auto-brightness off for the session: GNOME owns the panel backlight now, and two
 # controllers writing /sys/class/backlight/panel made GNOME's slider jump (P.1). Timeout max: stayon only
 # covers "plugged in", so an unplugged session would otherwise hit Android's idle screen-off.
-sh "$T/fedora-android-settings.sh" save
+sh "$T/fedora-android-settings.sh" save || abort_before_sf "could not save/apply the protective Android settings (rotation, idle, crash dialogs)"
 # 2026-09-27 ROOT CAUSE of the ColorFade crash loops (sessions #2, #4): `svc power stayon true` never worked from
 # this root context — svc runs app_process, which fails here with CANNOT LINK libnativeloader.so — so nothing
 # held Android awake: after the wake key it fell back into Doze/AOD ~4 s later, i.e. right after SF was stopped.
@@ -218,12 +266,7 @@ while [ "$w" -lt 30 ]; do
 done
 log "supervisor: wake nudge sent: $(echo "$pw" | grep -m1 mWakefulness=) display idle-stable=$ready after ${w}s tsp_enabled=$(cat /sys/class/sec/tsp/enabled 2>/dev/null)"
 if [ "$ready" != 1 ]; then
-	log "supervisor: ABORT — Android display did not settle (dream/animation still active); SurfaceFlinger NOT stopped"
-	$PWR set-wakelock release FULL_WAKE_LOCK >/dev/null 2>&1
-	$PWR suppress-ambient-display fedora-session false >/dev/null 2>&1
-	sh "$T/fedora-android-settings.sh" restore
-	kill -9 "$WPID" 2>/dev/null
-	exit 1
+	abort_before_sf "Android display did not settle (dream/animation still active)"
 fi
 # Defuse 2: archive + keep the native bootchecker dead for the whole session.
 # It is a oneshot (normally 'stopped') but init auto-RESTARTS it on framework
@@ -392,18 +435,31 @@ fi
 # on screen, its timeout removal started a WM transition that can never finish with SF stopped -> BLASTSync timeout ->
 # SurfaceControl DEAD_OBJECT -> system_server died (10:31:37). Wait (max 6 s) until no Toast window is left, then let
 # the removal transition settle 1 s.
+# audit F06: each query is time-bounded and the whole wait is wall-clock bounded; a query that fails or times out is
+# "unknown", never "no toast". If absence is not confirmed, abort before SF is stopped.
+mono() { read -r _up _ </proc/uptime; echo "${_up%%.*}"; }
+toast_state() {   # 0 = toast present, 1 = confirmed absent, 2 = unknown (query failed/timed out)
+	_o=$(timeout 5 runcon u:r:shell:s0 /system/bin/dumpsys window windows 2>/dev/null) || return 2
+	[ -n "$_o" ] || return 2
+	echo "$_o" | grep -qE "Window[{][0-9a-f]+ u0 Toast[}]" && return 0
+	return 1
+}
 tw=0
-while [ "$tw" -lt 12 ] && runcon u:r:shell:s0 /system/bin/dumpsys window windows 2>/dev/null | grep -qE "Window[{][0-9a-f]+ u0 Toast[}]"; do
+tdl=$(( $(mono) + 12 ))
+toast_state; tst=$?
+while [ "$tst" != 1 ] && [ "$(mono)" -lt "$tdl" ]; do
 	sleep 0.5; tw=$((tw + 1))
+	toast_state; tst=$?
 done
-if [ "$tw" -gt 0 ]; then
+if [ "$tst" = 1 ] && [ "$tw" -gt 0 ]; then
 	sleep 1
-	if runcon u:r:shell:s0 /system/bin/dumpsys window windows 2>/dev/null | grep -qE "Window[{][0-9a-f]+ u0 Toast[}]"; then
-		log "supervisor: WARNING a Toast window is still up after 6 s — stopping SF anyway"
-	else
-		log "supervisor: waited for Android toast(s) to clear before stopping SF ($tw x 0.5 s + 1 s settle)"
-	fi
+	toast_state; tst=$?
 fi
+if [ "$tst" != 1 ]; then
+	abort_before_sf "Android window state not settled (toast state=$tst: 0=toast still up, 2=dumpsys unavailable) after ~12 s"
+fi
+[ "$tw" -gt 0 ] && log "supervisor: waited for Android toast(s) to clear before stopping SF ($tw checks + 1 s settle)"
+phase sf-stopped 150
 runcon_shell stop surfaceflinger
 log "supervisor: surfaceflinger stopped (panel vrr=[$(cat /sys/class/lcd/panel/vrr 2>/dev/null)])"
 
@@ -462,14 +518,61 @@ log "supervisor: Android Wi-Fi handed to Fedora"
 # existing registrations on this Android version), and fedora-restore.sh's
 # start-surfaceflinger re-registers the real names before this is killed.
 SFSENTINEL_PID=""
-if [ -x "$T/sfsentinel" ]; then
-	setsid runcon u:r:surfaceflinger:s0 "$T/sfsentinel" >/dev/null 2>&1 &
-	SFSENTINEL_PID=$!
-	echo -1000 > /proc/$SFSENTINEL_PID/oom_score_adj 2>/dev/null
-	log "supervisor: sfsentinel placeholder started (pid $SFSENTINEL_PID, domain surfaceflinger)"
-else
-	log "supervisor: WARNING $T/sfsentinel missing — SF-name binder calls will hang while SF is stopped (watchdog/root-loss risk)"
+setsid runcon u:r:surfaceflinger:s0 "$T/sfsentinel" >/dev/null 2>&1 &
+SFSENTINEL_PID=$!
+echo -1000 > /proc/$SFSENTINEL_PID/oom_score_adj 2>/dev/null
+log "supervisor: sfsentinel placeholder started (pid $SFSENTINEL_PID, domain surfaceflinger)"
+# audit F04: the placeholder must be alive AND have registered the SurfaceFlinger name before HWC goes down. If not,
+# hand Android back now through the shared restore (HWC still up, nothing else stopped yet except SF/Wi-Fi).
+sw=0
+while [ "$sw" -lt 6 ]; do
+	sleep 1
+	kill -0 "$SFSENTINEL_PID" 2>/dev/null || break
+	runcon u:r:shell:s0 /system/bin/service check SurfaceFlinger 2>/dev/null | grep -q ": found" && break
+	sw=$((sw + 1))
+done
+if ! kill -0 "$SFSENTINEL_PID" 2>/dev/null || ! runcon u:r:shell:s0 /system/bin/service check SurfaceFlinger 2>/dev/null | grep -q ": found"; then
+	log "supervisor: ABORT — sfsentinel placeholder not running/registered after ${sw}s; restoring Android before going further"
+	kill -9 "$SFSENTINEL_PID" 2>/dev/null
+	kill -9 "$WPID" 2>/dev/null
+	[ -n "$AWPID" ] && kill -9 "$AWPID" 2>/dev/null
+	rm -f "$PH"
+	[ -n "$IHON" ] && { sh "$T/input-hide.sh" off; IHON=""; }
+	sh "$T/fedora-restore.sh"
+	arc=$?
+	# SF was stopped and restarted under a live system_server: replay surfaceflinger.rc "onrestart restart zygote"
+	# exactly as the normal tail does, so the framework re-binds to the real SF.
+	if [ "$arc" = 0 ] && [ "$(getprop init.svc.surfaceflinger)" = "running" ]; then
+		runcon_shell stop zygote
+		sleep 2
+		runcon_shell start zygote
+		zw=0
+		while [ "$zw" -lt 60 ] && [ "$(getprop init.svc.zygote)" != "running" ]; do sleep 1; zw=$((zw + 1)); done
+		sleep 5
+		runcon_shell stop bootanim
+	fi
+	st=0
+	while [ -f "$T/.fedora-android-settings" ] && [ "$st" -lt 6 ]; do
+		sleep 5
+		sh "$T/fedora-android-settings.sh" restore && break
+		st=$((st + 1))
+	done
+	if [ -f "$T/.wifi-svc-disabled" ]; then
+		wt=0
+		while [ "$wt" -lt 8 ]; do
+			sleep 4
+			timeout 20 runcon u:r:shell:s0 /system/bin/svc wifi enable
+			sleep 2
+			case "$(runcon u:r:shell:s0 /system/bin/settings get global wifi_on 2>/dev/null)" in 1|2) break;; esac
+			wt=$((wt + 1))
+		done
+		rm -f "$T/.wifi-svc-disabled"
+	fi
+	[ -n "$PGPID" ] && { kill "$PGPID" 2>/dev/null; sleep 1; kill -9 "$PGPID" 2>/dev/null; }
+	log "supervisor: sentinel-abort recovery done (restore rc=$arc, sf=$(getprop init.svc.surfaceflinger))"
+	exit 1
 fi
+log "supervisor: sfsentinel placeholder verified (pid alive, SurfaceFlinger name registered, ${sw}s)"
 
 runcon_shell stop vendor.hwcomposer-3-2
 elapsed=0
@@ -506,6 +609,7 @@ chroot "$R" /bin/sh -c 'export PATH=/usr/bin:/usr/sbin; mkdir -p /run/xdg /tmp/.
 setsid runcon u:r:untrusted_app:s0 chroot "$R" /bin/bash /root/gnome-shell-session-runner.sh >> "$T/gnome-shell-session.log" 2>&1 &
 CPID=$!
 log "supervisor: runner launched, pgid $CPID"
+phase run 0
 echo -1000 > /proc/$SPID/oom_score_adj 2>/dev/null   # after the runner fork: GNOME keeps its default
 
 (
@@ -666,13 +770,12 @@ pkill -9 -f scid=6d696330 2>/dev/null   # 2026-09-28 (§AE): Android mic server,
 [ -n "$IJPID" ] && kill -9 "$IJPID" 2>/dev/null   # 2026-09-27 input janitor (fd close auto-releases its grabs)
 # $R/run is a shared mount: the watcher's drive binds propagate back here and would keep the USB drive busy
 grep " $R/run/media/root/" /proc/mounts | awk '{print $2}' | while read -r m; do sync; umount -l "$m" 2>/dev/null && log "supervisor: drive bind $m released"; done
-# Take down the placeholder (harmless while real SF is still stopped; restore
-# below brings the real one up first and lets it re-register its own names).
-[ -n "$SFSENTINEL_PID" ] && { timeout 2 pkill -9 -x sfsentinel 2>/dev/null; kill -9 "$SFSENTINEL_PID" 2>/dev/null; }
-log "supervisor: sfsentinel dismissed"
+# audit F02: the sfsentinel placeholder is NOT killed here. It must stay up while HWC/SF are restarted; the shared
+# restore dismisses it only after the real SurfaceFlinger is confirmed running (and keeps it if that fails).
 log "supervisor: dismissing watchdog ($WPID)"
 kill -9 "$WPID" 2>/dev/null
 log "supervisor: watchdog dismissed"
+rm -f "$PH"
 log "supervisor: invoking shared restore (F14)"
 # 2026-09-26 audit #3: an aborted restore (master held / HWC down) used to be final. Retry it; each attempt
 # escalates on its own (kills chroot card0 holders, restarts HWC).
@@ -689,7 +792,7 @@ log "supervisor: compositor exited rc=$RC — restore returned rc=$rrc after $ra
 # Belt-and-suspenders: the restore's start surfaceflinger re-registers the real
 # names (overwriting any lingering placeholder). If the stub somehow survived,
 # remove it ONLY after SF is confirmed back so the real registration wins.
-[ -n "$SFSENTINEL_PID" ] && { timeout 2 pkill -9 -x sfsentinel 2>/dev/null; }
+[ -n "$SFSENTINEL_PID" ] && [ "$(getprop init.svc.surfaceflinger)" = "running" ] && { timeout 2 pkill -9 -x sfsentinel 2>/dev/null; }
 
 # 2026-09-24 (sfsentinel v2): the stub now ANSWERS createDisplayEventConnection,
 # so system_server/apps survive the session holding a fake vsync channel that

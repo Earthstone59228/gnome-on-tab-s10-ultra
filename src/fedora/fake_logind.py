@@ -172,11 +172,33 @@ def _retry_screen_blank(want):
     return False
 
 
-def on_cover_event(fd, _condition):
+def _drop_cover_watch(fd, why):
+    """audit F15: a cover fd that hit a permanent condition (device removed, EOF, HUP/ERR) must leave the main
+    loop, otherwise it stays permanently ready and spins the loop that also serves D-Bus. Returning False from the
+    GLib callback removes the watch; the fd is closed (which also drops our EVIOCGRAB) and forgotten."""
+    log(f"cover input fd {fd} dropped: {why}")
+    try:
+        held_switch_fds.remove(fd)
+    except ValueError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    return False
+
+
+def on_cover_event(fd, condition):
     try:
         data = os.read(fd, INPUT_EVENT.size * 16)
-    except OSError:
-        return True
+    except (BlockingIOError, InterruptedError):
+        return True                      # transient: nothing to read right now
+    except OSError as e:
+        return _drop_cover_watch(fd, f"read failed: {e!r}")   # ENODEV etc. are permanent
+    if not data:
+        return _drop_cover_watch(fd, "EOF")
+    if condition & (GLib.IO_HUP | GLib.IO_ERR) and not condition & GLib.IO_IN:
+        return _drop_cover_watch(fd, f"condition {int(condition)}")
     for off in range(0, len(data) - len(data) % INPUT_EVENT.size, INPUT_EVENT.size):
         _sec, _usec, ev_type, code, value = INPUT_EVENT.unpack_from(data, off)
         if ev_type == EV_SW and code == SW_MACHINE_COVER:
