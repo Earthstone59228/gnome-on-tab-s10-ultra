@@ -14,6 +14,8 @@ T=/data/local/tmp
 HB=$T/.fedora-session-gnome-shell-hb
 LOG=$T/fedora-session-gnome-shell.log
 log() { echo "$(date) $*" >> "$LOG"; }
+# pkill -x does not match sfsentinel on this Android (returns 1 with the process alive); kill by pid instead
+kill_sentinel() { for _sp in $(pidof sfsentinel 2>/dev/null); do kill -9 "$_sp" 2>/dev/null; done; }
 # Same chroot-scoped kill as fedora-restore.sh: never touches Android/Termux
 # processes that share a name (python3, dbus-daemon).
 # Root of a process as seen from here; falls back to a live thread when the
@@ -560,7 +562,7 @@ if ! kill -0 "$SFSENTINEL_PID" 2>/dev/null || ! runcon u:r:shell:s0 /system/bin/
 		exit 1
 	fi
 	kill -9 "$SFSENTINEL_PID" 2>/dev/null
-	timeout 2 pkill -9 -x sfsentinel 2>/dev/null
+	kill_sentinel
 	# SF was stopped and restarted under a live system_server: replay surfaceflinger.rc "onrestart restart zygote"
 	runcon_shell stop zygote
 	sleep 2
@@ -815,7 +817,7 @@ log "supervisor: compositor exited rc=$RC — restore returned rc=$rrc after $ra
 # Belt-and-suspenders: the restore's start surfaceflinger re-registers the real
 # names (overwriting any lingering placeholder). If the stub somehow survived,
 # remove it ONLY after SF is confirmed back so the real registration wins.
-[ -n "$SFSENTINEL_PID" ] && [ "$(getprop init.svc.surfaceflinger)" = "running" ] && { timeout 2 pkill -9 -x sfsentinel 2>/dev/null; }
+[ -n "$SFSENTINEL_PID" ] && [ "$(getprop init.svc.surfaceflinger)" = "running" ] && { kill_sentinel; }
 
 # 2026-09-24 (sfsentinel v2): the stub now ANSWERS createDisplayEventConnection,
 # so system_server/apps survive the session holding a fake vsync channel that

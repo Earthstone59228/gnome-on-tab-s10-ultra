@@ -24,6 +24,8 @@ R=/data/fedora
 T=/data/local/tmp
 LOG=$T/fedora-session.log
 log() { echo "$(date) restore: $*" >>"$LOG"; }
+# pkill -x does not match sfsentinel on this Android (returns 1 with the process alive); kill by pid instead
+kill_sentinel() { for _sp in $(pidof sfsentinel 2>/dev/null); do kill -9 "$_sp" 2>/dev/null; done; }
 
 # F12: retry-until-gone pkill loop. pkill rc: 0=matched(retry), 1=none
 # left(done), 124=timeout(retry). Max 5 rounds, then give up and continue —
@@ -284,8 +286,12 @@ fi
 # SF's addService OVERWRITES a placeholder registration, so the correct order
 # is: confirm real SF is up FIRST, then kill the placeholder. Killing it
 # earlier would reopen the wedge window during HWC/SF startup.
-timeout 2 pkill -9 -x sfsentinel 2>/dev/null
-log "sfsentinel placeholder dismissed (real SF owns its names again)"
+kill_sentinel
+if [ -n "$(pidof sfsentinel 2>/dev/null)" ]; then
+	log "WARNING: sfsentinel placeholder still alive after kill (real SF owns its names regardless)"
+else
+	log "sfsentinel placeholder dismissed (real SF owns its names again)"
+fi
 
 # 2026-09-25: drop the policy rule the Fedora session adds (gnome-peripherals.sh) so Android
 # routing is exactly as before; bounded loop, "ip rule del" fails once none are left.
