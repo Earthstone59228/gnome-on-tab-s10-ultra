@@ -1224,6 +1224,7 @@ void gbm_surface_destroy(struct gbm_surface *surface) {
 			s->ahb = NULL;
 			s->bo = NULL;
 			s->acquire_fence = -1;
+			s->release_fence = -1;   /* the detached copy owns it now (no double close at deferred free) */
 			s->state = SLOT_DEQUEUED;
 		}
 	}

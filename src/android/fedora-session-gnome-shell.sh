@@ -115,7 +115,8 @@ trap "" TERM INT HUP
 # bring-up phase past its deadline as hung: it kills it and runs the shared restore itself (so exactly one restorer
 # runs). The run phase has no deadline (the time-box/monitor own it); a normal exit removes the file.
 PH=$T/.fedora-session-phase
-phase() { echo "$1 $(( $(date +%s) + $2 ))" > "$PH.tmp" && mv -f "$PH.tmp" "$PH"; }
+mono() { read -r _up _ </proc/uptime; echo "${_up%%.*}"; }   # monotonic seconds: immune to wall-clock steps
+phase() { echo "$1 $(( $(mono) + $2 )) $SPID" > "$PH.tmp" && mv -f "$PH.tmp" "$PH"; }
 phase bringup 480
 # 2026-09-26 audit #3 (daily use): the supervisor and its watchdog are the only things that bring
 # Android's display back, so the OOM killer must never pick them. oom_score_adj is INHERITED across
@@ -155,11 +156,16 @@ setsid nohup sh -c '
 		sdead=0
 		kill -0 "$SPID" 2>/dev/null || sdead=1
 		if [ "$sdead" = 0 ] && [ -f "$PH" ]; then
-			pname=""; pdl=0
-			read -r pname pdl < "$PH" 2>/dev/null
+			pname=""; pdl=0; psp=""
+			read -r pname pdl psp < "$PH" 2>/dev/null
+			if [ -n "$psp" ] && [ "$psp" != "$SPID" ]; then
+				echo "$(date) watchdog: a newer supervisor ($psp) owns the session — this watchdog ($SPID) retires" >> "$LOG"
+				exit 0
+			fi
 			case "$pdl" in ""|*[!0-9]*) pdl=0;; esac
-			if [ "$pdl" -gt 0 ] && [ "$NOW" -gt "$pdl" ]; then
-				echo "$(date) watchdog: supervisor $SPID still in phase $pname $((NOW - pdl))s past its deadline — killing it, restore follows" >> "$LOG"
+			read -r mup _ < /proc/uptime; MNOW=${mup%%.*}
+			if [ "$pdl" -gt 0 ] && [ "$MNOW" -gt "$pdl" ]; then
+				echo "$(date) watchdog: supervisor $SPID still in phase $pname $((MNOW - pdl))s past its deadline — killing it, restore follows" >> "$LOG"
 				kill -9 "$SPID" 2>/dev/null
 				sleep 1
 				sdead=1; stale=2
@@ -437,7 +443,6 @@ fi
 # the removal transition settle 1 s.
 # audit F06: each query is time-bounded and the whole wait is wall-clock bounded; a query that fails or times out is
 # "unknown", never "no toast". If absence is not confirmed, abort before SF is stopped.
-mono() { read -r _up _ </proc/uptime; echo "${_up%%.*}"; }
 toast_state() {   # 0 = toast present, 1 = confirmed absent, 2 = unknown (query failed/timed out)
 	_o=$(timeout 5 runcon u:r:shell:s0 /system/bin/dumpsys window windows 2>/dev/null) || return 2
 	[ -n "$_o" ] || return 2
@@ -532,25 +537,37 @@ while [ "$sw" -lt 6 ]; do
 	sw=$((sw + 1))
 done
 if ! kill -0 "$SFSENTINEL_PID" 2>/dev/null || ! runcon u:r:shell:s0 /system/bin/service check SurfaceFlinger 2>/dev/null | grep -q ": found"; then
-	log "supervisor: ABORT — sfsentinel placeholder not running/registered after ${sw}s; restoring Android before going further"
-	kill -9 "$SFSENTINEL_PID" 2>/dev/null
+	log "supervisor: ABORT — sfsentinel placeholder not running/registered after ${sw}s; handing Android back (HWC is still up, so SurfaceFlinger is simply started again — the shared restore cannot be used here: HWC holds DRM master)"
 	kill -9 "$WPID" 2>/dev/null
 	[ -n "$AWPID" ] && kill -9 "$AWPID" 2>/dev/null
-	rm -f "$PH"
 	[ -n "$IHON" ] && { sh "$T/input-hide.sh" off; IHON=""; }
-	sh "$T/fedora-restore.sh"
-	arc=$?
-	# SF was stopped and restarted under a live system_server: replay surfaceflinger.rc "onrestart restart zygote"
-	# exactly as the normal tail does, so the framework re-binds to the real SF.
-	if [ "$arc" = 0 ] && [ "$(getprop init.svc.surfaceflinger)" = "running" ]; then
-		runcon_shell stop zygote
+	sfok=0
+	for sfa in 1 2 3; do
+		runcon_shell start surfaceflinger
+		sfw=0
+		while [ "$sfw" -lt 15 ] && [ "$(getprop init.svc.surfaceflinger)" != "running" ]; do sleep 1; sfw=$((sfw + 1)); done
+		[ "$(getprop init.svc.surfaceflinger)" = "running" ] && { sfok=1; break; }
+		runcon_shell stop surfaceflinger
 		sleep 2
-		runcon_shell start zygote
-		zw=0
-		while [ "$zw" -lt 60 ] && [ "$(getprop init.svc.zygote)" != "running" ]; do sleep 1; zw=$((zw + 1)); done
-		sleep 5
-		runcon_shell stop bootanim
+	done
+	if [ "$sfok" != 1 ]; then
+		# keep the placeholder (fail-fast names) and the phase file out of the way; the watchdog is already gone, so say so loudly
+		log "supervisor: sentinel-abort: SurfaceFlinger did NOT start after 3 attempts — placeholder (if alive) kept; manual recovery: sh $T/fedora-restore.sh (hardware fallback POWER + VOL DOWN ~10 s)"
+		rm -f "$PH"
+		exit 1
 	fi
+	kill -9 "$SFSENTINEL_PID" 2>/dev/null
+	timeout 2 pkill -9 -x sfsentinel 2>/dev/null
+	# SF was stopped and restarted under a live system_server: replay surfaceflinger.rc "onrestart restart zygote"
+	runcon_shell stop zygote
+	sleep 2
+	runcon_shell start zygote
+	zw=0
+	while [ "$zw" -lt 60 ] && [ "$(getprop init.svc.zygote)" != "running" ]; do sleep 1; zw=$((zw + 1)); done
+	sleep 5
+	runcon_shell stop bootanim
+	runcon u:r:shell:s0 /system/bin/cmd power set-wakelock release FULL_WAKE_LOCK >/dev/null 2>&1
+	runcon u:r:shell:s0 /system/bin/cmd power suppress-ambient-display fedora-session false >/dev/null 2>&1
 	st=0
 	while [ -f "$T/.fedora-android-settings" ] && [ "$st" -lt 6 ]; do
 		sleep 5
@@ -558,6 +575,8 @@ if ! kill -0 "$SFSENTINEL_PID" 2>/dev/null || ! runcon u:r:shell:s0 /system/bin/
 		st=$((st + 1))
 	done
 	if [ -f "$T/.wifi-svc-disabled" ]; then
+		bw=0
+		while [ "$bw" -lt 90 ] && [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 1; bw=$((bw + 1)); done
 		wt=0
 		while [ "$wt" -lt 8 ]; do
 			sleep 4
@@ -569,7 +588,8 @@ if ! kill -0 "$SFSENTINEL_PID" 2>/dev/null || ! runcon u:r:shell:s0 /system/bin/
 		rm -f "$T/.wifi-svc-disabled"
 	fi
 	[ -n "$PGPID" ] && { kill "$PGPID" 2>/dev/null; sleep 1; kill -9 "$PGPID" 2>/dev/null; }
-	log "supervisor: sentinel-abort recovery done (restore rc=$arc, sf=$(getprop init.svc.surfaceflinger))"
+	rm -f "$PH"
+	log "supervisor: sentinel-abort recovery done (sf=$(getprop init.svc.surfaceflinger) zygote=$(getprop init.svc.zygote))"
 	exit 1
 fi
 log "supervisor: sfsentinel placeholder verified (pid alive, SurfaceFlinger name registered, ${sw}s)"
@@ -846,5 +866,11 @@ fi
 # remove it here at the very end, after restore/settings/Wi-Fi — never earlier in cleanup, where SF is still stopped
 # and removing it with the real keyboard detached would re-create the config change it exists to prevent.
 # Input hide fallback, same reasoning; before the ghost so a keyboard re-attached mid-session is re-announced first.
-[ -n "$IHON" ] && { sh "$T/input-hide.sh" off; log "supervisor: input hide off (end of supervisor; $(tail -1 "$T/input-hide.log" 2>/dev/null))"; }
-[ -n "$PGPID" ] && { kill "$PGPID" 2>/dev/null; sleep 1; kill -9 "$PGPID" 2>/dev/null; log "supervisor: pogo ghost removed (end of supervisor)"; }
+# audit: never with SF down (that is the one thing the ghost exists to prevent) - if SF did not come back, leave them;
+# the ghost removes itself when this supervisor exits and the input-hide watcher turns itself off when its owner dies.
+if [ "$(getprop init.svc.surfaceflinger)" = "running" ]; then
+	[ -n "$IHON" ] && { sh "$T/input-hide.sh" off; log "supervisor: input hide off (end of supervisor; $(tail -1 "$T/input-hide.log" 2>/dev/null))"; }
+	[ -n "$PGPID" ] && { kill "$PGPID" 2>/dev/null; sleep 1; kill -9 "$PGPID" 2>/dev/null; log "supervisor: pogo ghost removed (end of supervisor)"; }
+else
+	log "supervisor: SurfaceFlinger not running at the end — leaving the pogo ghost / input hide to remove themselves"
+fi

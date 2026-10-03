@@ -216,9 +216,13 @@ class CameraNode:
         conv = make("videoconvert")
         flip = None
         if os.path.exists(FLIP_FLAG % self.facing):
-            flip = make("videoflip", "mirror-fix")
-            flip.set_property("method", "horizontal-flip")
-            log("%s: horizontal flip ENABLED by %s" % (self.facing, FLIP_FLAG % self.facing))
+            try:
+                flip = make("videoflip", "mirror-fix")
+                flip.set_property("method", "horizontal-flip")
+                log("%s: horizontal flip ENABLED by %s" % (self.facing, FLIP_FLAG % self.facing))
+            except RuntimeError as e:
+                log("%s: flip requested but unavailable (%s) — continuing unflipped" % (self.facing, e))
+                flip = None
         scale = make("videoscale")
         rate = make("videorate")
         # 2026-09-28 (doc 11 §AC): without these, videorate filled every gap with duplicates — from the segment start
@@ -577,6 +581,8 @@ class CaptureManager:
         if self.active_facing == facing:
             log("%s: reader ended (%s) while active — treating as stopped" % (facing, reason))
             self.active_facing = None
+            self.need_stop = True   # Android may still be capturing (e.g. decoder stall): stop it, serialized
+            self._pump()
             self._reconcile_idle_after_unexpected_stop()
 
     def on_pipeline_crashed(self, facing):
@@ -626,14 +632,18 @@ class CaptureManager:
             self.want = facing   # serialized: runs after the in-flight request completes
             return
         self.need_stop = False   # cam-<facing> itself stops whatever was running first
+        node = self.nodes[facing]
+        try:
+            node.ensure_pipeline()   # first: a build failure must not leave busy/active_facing set
+        except Exception as e:  # noqa
+            log("%s: pipeline build failed (%r) — staying idle until the next new link" % (facing, e))
+            return
         old = self.active_facing
         self.active_facing = facing
         self.busy = True
         if old and old != facing:
             self.nodes[old].go_black()
             self.nodes[old].stop_reader()
-        node = self.nodes[facing]
-        node.ensure_pipeline()
 
         def worker():
             try:
@@ -734,6 +744,8 @@ class CaptureManager:
     def _aux_stop_done(self):
         self.busy = False
         self._pump()
+        if self.active_facing is None and not self.busy and self.need_stop is False:
+            self._reconcile_idle()   # a consumer may have linked while the unowned capture was being stopped
         return False
 
     def _stop_done(self, facing):

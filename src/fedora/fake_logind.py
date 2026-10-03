@@ -189,6 +189,8 @@ def _drop_cover_watch(fd, why):
 
 
 def on_cover_event(fd, condition):
+    if condition & (GLib.IO_HUP | GLib.IO_ERR) and not condition & GLib.IO_IN:
+        return _drop_cover_watch(fd, f"condition {int(condition)}")
     try:
         data = os.read(fd, INPUT_EVENT.size * 16)
     except (BlockingIOError, InterruptedError):
@@ -197,8 +199,6 @@ def on_cover_event(fd, condition):
         return _drop_cover_watch(fd, f"read failed: {e!r}")   # ENODEV etc. are permanent
     if not data:
         return _drop_cover_watch(fd, "EOF")
-    if condition & (GLib.IO_HUP | GLib.IO_ERR) and not condition & GLib.IO_IN:
-        return _drop_cover_watch(fd, f"condition {int(condition)}")
     for off in range(0, len(data) - len(data) % INPUT_EVENT.size, INPUT_EVENT.size):
         _sec, _usec, ev_type, code, value = INPUT_EVENT.unpack_from(data, off)
         if ev_type == EV_SW and code == SW_MACHINE_COVER:

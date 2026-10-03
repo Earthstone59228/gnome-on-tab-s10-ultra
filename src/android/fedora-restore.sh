@@ -173,6 +173,12 @@ kill_card_holders() {
 	return $hit
 }
 
+# audit (2026-10-03): if real SurfaceFlinger AND HWC are both still running, the Android display path was never taken
+# down (e.g. the watchdog killed a supervisor that hung during bring-up). HWC holds DRM master then, so the master
+# check below could never pass; there is nothing to restart, so go straight to the settings/wake-lock tail.
+if [ "$(getprop init.svc.surfaceflinger)" = running ] && [ "$(getprop init.svc.vendor.hwcomposer-3-2)" = running ]; then
+	log "SurfaceFlinger and HWC are still running — display path never went down; skipping master check / HWC / SF restart"
+else
 # F11: master-free check. Never touch HWC/SF while master is held.
 # Monotonic seconds (CLOCK_BOOTTIME-ish /proc/uptime), immune to wall-clock steps.
 mono() { read -r _up _ </proc/uptime; echo "${_up%%.*}"; }
@@ -196,6 +202,12 @@ while [ "$round" -lt 4 ] && [ "$(mono)" -lt "$master_deadline" ]; do
 	[ "$round" -lt 4 ] || break
 	[ "$(mono)" -lt "$master_deadline" ] || break
 	log "master still held after ${total}s — escalation round $round: kill chroot card0 holders + compositors"
+	if [ "$(getprop init.svc.surfaceflinger)" != running ] && [ "$(getprop init.svc.vendor.hwcomposer-3-2)" = running ]; then
+		# HWC holds master while SF is down only after a failed SF start; never stop HWC while SF is up
+		log "SurfaceFlinger is down but HWC still holds the display — stopping HWC before the next master check"
+		runcon u:r:shell:s0 /system/bin/stop vendor.hwcomposer-3-2
+		sleep 3
+	fi
 	kill_card_holders
 	kill_compositors
 done
@@ -234,17 +246,22 @@ log "vendor.hwcomposer-3-2 running (attempt $attempt, ${elapsed}s)"
 
 sleep 3
 
-runcon u:r:shell:s0 /system/bin/start surfaceflinger
-elapsed=0
 sf_up=0
-while [ "$elapsed" -lt 15 ]; do
-	state=$(getprop init.svc.surfaceflinger)
-	if [ "$state" = "running" ]; then
-		sf_up=1
-		break
-	fi
-	sleep 1
-	elapsed=$((elapsed + 1))
+for sf_attempt in 1 2 3; do
+	runcon u:r:shell:s0 /system/bin/start surfaceflinger
+	elapsed=0
+	while [ "$elapsed" -lt 15 ]; do
+		if [ "$(getprop init.svc.surfaceflinger)" = "running" ]; then
+			sf_up=1
+			break
+		fi
+		sleep 1
+		elapsed=$((elapsed + 1))
+	done
+	[ "$sf_up" = 1 ] && break
+	log "surfaceflinger not running after ${elapsed}s (attempt $sf_attempt/3, state=$(getprop init.svc.surfaceflinger)) — stop + retry"
+	runcon u:r:shell:s0 /system/bin/stop surfaceflinger
+	sleep 2
 done
 if [ "$sf_up" = 1 ]; then
 	log "surfaceflinger running (${elapsed}s)"
@@ -252,11 +269,13 @@ else
 	# audit F03: do NOT dismiss the sfsentinel placeholder, release the wake lock or restore settings, and do
 	# NOT report success — the supervisor retries (each retry restarts HWC/SF), and the placeholder keeps
 	# system_server from wedging on the missing SurfaceFlinger names meanwhile.
-	log "ABORT: surfaceflinger not running after ${elapsed}s (state=$(getprop init.svc.surfaceflinger)) — sfsentinel placeholder, wake lock and settings snapshot KEPT; rc=1 so the caller retries"
+	log "ABORT: surfaceflinger not running after 3 attempts (state=$(getprop init.svc.surfaceflinger)) — sfsentinel placeholder, wake lock and settings snapshot KEPT; stopping HWC so a retry can take DRM master again; rc=1"
+	runcon u:r:shell:s0 /system/bin/stop vendor.hwcomposer-3-2
 	echo "restore INCOMPLETE: surfaceflinger did not start — see $LOG; force-restart = POWER + VOL DOWN ~10 s" >&2
 	exit 1
 fi
 
+fi
 # SfSentinel handoff (2026-09-20 root-loss fix): while SF was stopped, the
 # session supervisor's sfsentinel placeholder owned the "SurfaceFlinger" /
 # "SurfaceFlingerAIDL" servicemanager names, so system_server's
