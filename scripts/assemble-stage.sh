@@ -47,6 +47,9 @@ cp -p "$repo/src/fedora/pkexec-chroot-wrapper.sh" \
   "$stage/fedora/usr/local/bin/pkexec"
 
 cp -p "$repo/config/android-brightness-map.json" "$stage/fedora/usr/local/etc/"
+# U02 (confirmed on the tablet 2026-10-03): the rear camera arrives mirrored left-to-right; the camera node flips it
+# horizontally when this flag exists. Front camera is not flipped (add android-camera-flip-front if ever needed).
+: > "$stage/fedora/usr/local/etc/android-camera-flip-back"
 cp -p "$repo/config/95-wifi-preserve-mac.conf" \
   "$stage/fedora/etc/NetworkManager/conf.d/"
 cp -p "$repo/config/gnome-wifi.conf" \
