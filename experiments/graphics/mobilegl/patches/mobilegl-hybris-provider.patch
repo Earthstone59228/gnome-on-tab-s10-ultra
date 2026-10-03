@@ -1,0 +1,55 @@
+--- a/MobileGL/MG_Util/BackendLoaders/OpenGL/Loader.cpp
++++ b/MobileGL/MG_Util/BackendLoaders/OpenGL/Loader.cpp
+@@ -134,9 +134,22 @@
+             return;
+         }
+ 
++        void* explicitGLES = nullptr;
++        if (const char* provider = std::getenv("MOBILEGL_GLES_LIBRARY")) {
++            explicitGLES = dlopen(provider, RTLD_LOCAL | RTLD_NOW);
++            if (!explicitGLES) {
++                MGLOG_F("Explicit GLES backend failed: %s: %s", provider, dlerror());
++                return;
++            }
++        }
++        auto resolveGLES = [&](const char* name) {
++            void* core = explicitGLES ? dlsym(explicitGLES, name) : nullptr;
++            return core ? core : reinterpret_cast<void*>(procAddress(name));
++        };
++
+ #define INIT_GLES_FUNC(name)                                                                                           \
+     do {                                                                                                               \
+-        funcs.name = (MG_External::GLES::name##_PTR)procAddress(#name);                                                \
++        funcs.name = (MG_External::GLES::name##_PTR)resolveGLES(#name);                                                \
+         if (!funcs.name) {                                                                                             \
+             MGLOG_E("Failed to load GLES function: %s", #name);                                                        \
+         }                                                                                                              \
+@@ -146,7 +159,7 @@
+ // extension, so absence is not an error. The call site null-checks before use.
+ #define INIT_GLES_FUNC_OPTIONAL(name)                                                                                  \
+     do {                                                                                                               \
+-        funcs.name = (MG_External::GLES::name##_PTR)procAddress(#name);                                                \
++        funcs.name = (MG_External::GLES::name##_PTR)resolveGLES(#name);                                                \
+     } while (0);
+ 
+         {
+@@ -593,7 +606,18 @@
+             // call through a null pointer (SIGSEGV inside InitDisplayAndContext).
+             // Developer machines have both names, which is exactly why this only ever
+             // showed up in CI.
+-            eglLib = OpenLib({"libEGL.so.1", "libEGL.so"});
++            // Isolated Linux experiment: choose a backend independently of the
++            // MobileGL frontend libEGL aliases. Never silently fall back if set.
++            if (const char* provider = std::getenv("MOBILEGL_EGL_LIBRARY")) {
++                eglLib = dlopen(provider, RTLD_LOCAL | RTLD_NOW);
++                if (!eglLib) {
++                    MGLOG_F("Explicit EGL backend failed: %s: %s", provider, dlerror());
++                    return;
++                }
++                MGLOG_I("Explicit EGL backend: %s", provider);
++            } else {
++                eglLib = OpenLib({"libEGL.so.1", "libEGL.so"});
++            }
+ #endif
+         }
+ #endif // !_WIN32

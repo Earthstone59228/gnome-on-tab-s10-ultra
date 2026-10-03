@@ -1,0 +1,13 @@
+diff --git a/MobileGL/MG_Impl/GLXImpl/GLXImpl.cpp b/MobileGL/MG_Impl/GLXImpl/GLXImpl.cpp
+index c7f73ab..a3f36f4 100644
+--- a/MobileGL/MG_Impl/GLXImpl/GLXImpl.cpp
++++ b/MobileGL/MG_Impl/GLXImpl/GLXImpl.cpp
+@@ -174,7 +174,7 @@ namespace MobileGL::MG_Impl::GLXImpl {
+         }
+ 
+         struct ContextObject {
+-            Display* XDisplay = nullptr;
++            struct _XDisplay* XDisplay = nullptr;
+             EGLDisplay Display = EGL_NO_DISPLAY;
+             EGLConfig Config = nullptr;
+             EGLContext Context = EGL_NO_CONTEXT;

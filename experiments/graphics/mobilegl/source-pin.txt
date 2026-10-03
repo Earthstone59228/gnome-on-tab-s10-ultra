@@ -1,0 +1,19 @@
+MobileGL source commit:
+b1d60523e4b34f9b8a6e290f10a41a4167ba0e8a
+
+Submodules (git submodule status; a leading '-' means not initialised in the archive):
+-f36e63880566649d9d8b2336a7c5aa9c8ddb174b 3rdparty/DiligentCore
+ 072444287f4e139c178d6d8fe32e04a0d2c34e8b 3rdparty/SPIRV-Cross (0724442)
+ 10b4f09a24d7ac1603071e767c089551dc6a3949 3rdparty/SPIRV-Reflect (10b4f09)
+ ad9ce1235e88dc09287e19171dfac384db8ec32c 3rdparty/Vulkan-Headers (ad9ce12)
+ 738ec97a3f659dd6469bff3c4078ef981b0a343f 3rdparty/Vulkan-Utility-Libraries (738ec97)
+ e722e57c891a8fbe3cc73ca56c19dd76be242759 3rdparty/VulkanMemoryAllocator (e722e57)
+-c8036190fcb79ce0d64cf44ab419c54c3307cd71 3rdparty/apitrace
+ 8806a6803cde7054c3049d3666d3ec36786568c5 3rdparty/asio (asio-1-38-2)
+ d89cf443bcd220e9205defa0cc4c4b8d8f75dfa2 3rdparty/glslang (heads/main)
+-e6b9ea460993a6f093283055ef3c98025b19f909 3rdparty/tracy
+ 1d7b2a9d21bf9a740ead540aa93f4bc4caf11ae0 3rdparty/xxHash (1d7b2a9)
+ 21c1cec95abee1beef827e4a7c95f692875d9594 include/ska (heads/master)
+
+Source archive sha256 (archive not redistributed):
+df7a5418e7aa3831b69d8159f7dfd16030db77adf124ffddb93ffa213bdaea89  work/mobilegl-20261001/source.tar.gz

@@ -1,0 +1,19 @@
+#!/bin/sh
+# Tested desktop GL path for the Tab S10 Ultra; libraries remain per application.
+set -eu
+D=/usr/local/lib/mobilegl-20261001
+if [ "$#" -eq 0 ]; then echo 'Usage: mali-modern-gl PROGRAM [ARGUMENT...]' >&2; exit 2; fi
+export MOBILEGL_X11_COPY=1 MOBILEGL_BACKEND_TYPE=DirectGLES
+export MOBILEGL_GLES_LIBRARY=/usr/local/lib/hybris-wl/libGLESv2.so.2.0.0
+export MOBILEGL_EGL_LIBRARY=/usr/local/lib/hybris-wl/libEGL.so.1.0.0
+export LD_LIBRARY_PATH="$D/glx:/usr/local/lib/hybris-vendor${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# Only the established TLS padding library is preloaded. MobileGL is selected
+# through GL/GLX aliases, leaving EGL loaders in other subprocesses independent.
+case ":${LD_PRELOAD-}:" in
+ *:/usr/local/lib/libtls-padding.so:*) ;;
+ *) export LD_PRELOAD="/usr/local/lib/libtls-padding.so${LD_PRELOAD:+:$LD_PRELOAD}" ;;
+esac
+export LIBEGL=/usr/local/lib/hybris-vendor/libGLES_mali.so LIBGLESV2=/usr/local/lib/hybris-vendor/libGLES_mali.so HYBRIS_EGLPLATFORM=null
+export GDK_BACKEND=x11
+unset LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE
+exec "$@"

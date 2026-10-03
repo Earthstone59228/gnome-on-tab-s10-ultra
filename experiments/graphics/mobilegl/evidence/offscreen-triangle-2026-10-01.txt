@@ -1,0 +1,11 @@
+# Excerpt of the offscreen triangle run (2026-10-01). Process memory-map lines were removed; the result lines are unchanged.
+SURFACEFLINGER_BEFORE=25098
+FRONTEND_RENDERER=Espryt (MobileGL Core) (Mali-G720-Immortalis MC12, OpenGL ES 3.2)
+FRONTEND_VERSION=4.6.0 MobileGL 26.08-dev, Direct (OpenGL ES) Backend, GIT@
+SHADER type=8b31 ok=1 log=
+SHADER type=8b30 ok=1 log=
+LINK ok=1 log=
+PIXEL center=255,0,0,255 corner=0,0,255,255 error=0
+RESULT=PASS
+TRIANGLE_EXIT=0
+SURFACEFLINGER_AFTER=25098
