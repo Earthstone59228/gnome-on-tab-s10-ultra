@@ -1,0 +1,17 @@
+#!/bin/sh
+# Desktop OpenGL 2.1 for X11/GLX apps (wxGTK KiCad/PrusaSlicer, OpenSCAD, ...) on the Mali via gl4es.
+# Renders into a pbuffer (LIBGL_FB=3) and copies to the X window, because the Mali EGL cannot draw to X windows.
+# Needs an X server (Xwayland in GNOME, or Xvfb for tests). Usage: mali-gl-x11 PROGRAM [ARGUMENT...]
+set -eu
+if [ "$#" -eq 0 ]; then echo 'Usage: mali-gl-x11 PROGRAM [ARGUMENT...]' >&2; exit 2; fi
+H=/usr/local/lib/hybris-wl
+export LD_LIBRARY_PATH="/usr/local/lib/gl4es-x11:/usr/local/lib/hybris-vendor:$H${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export HYBRIS_EGLPLATFORM=null
+export LIBGL_FB=3 LIBGL_ES=2
+export LIBGL_EGL="$H/libEGL.so.1" LIBGL_GLES="$H/libGLESv2.so.2"
+export LIBEGL=/usr/local/lib/hybris-vendor/libGLES_mali.so LIBGLESV2=/usr/local/lib/hybris-vendor/libGLES_mali.so
+export GDK_BACKEND=x11 QT_QPA_PLATFORM=xcb
+export HYBRIS_LOGGING_TARGET=stderr HYBRIS_LOGGING_LEVEL=warning
+export LD_PRELOAD="/usr/local/lib/libtls-padding.so${LD_PRELOAD:+:$LD_PRELOAD}"
+unset LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER __EGL_VENDOR_LIBRARY_FILENAMES
+exec "$@"

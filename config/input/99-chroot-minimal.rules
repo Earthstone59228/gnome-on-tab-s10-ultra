@@ -1,0 +1,32 @@
+# Hand-written minimal allowlist for the fedora-native chroot (see driver-build/03-touch-input.md).
+# ONLY grants node perms for input + the single DRM node this SoC exposes.
+# Deliberately NOT the stock 50-udev-default.rules or any other stock rule file --
+# those also chmod/chown/rename real Android tty, serial, sound, and network
+# nodes shared via the bind-mounted /dev, which would corrupt Android's view.
+#
+# 2026-09-17 fix (live-tested, caused real drift once): NO GROUP=/OWNER=
+# assignment. GROUP="input"/"video" resolves against the CHROOT's own
+# /etc/group (gid 104/39 here), which has NO relationship to Android's
+# AID-based group numbers on the real, shared /dev nodes (Android's actual
+# ownership is "system:input" via AID_SYSTEM/AID_INPUT, not these
+# chroot-local numbers). Applying GROUP= silently reassigned live Android
+# device nodes to meaningless local gids and broke Android's own
+# touchscreen/DRM access until manually chown'd back. MODE=0660 is also
+# strictly unnecessary (these nodes are already 0660 by default) but kept as
+# an explicit, harmless no-op — our compositor runs as root anyway, which
+# bypasses DAC checks entirely, so no permission grant is actually needed
+# here. The real requirement this file (+ 60-input-id.rules) serves is
+# populating udev's device DATABASE with ID_INPUT* classification tags,
+# which is what libinput's enumeration actually reads — not file permissions.
+SUBSYSTEM=="input", KERNEL=="event*", MODE="0660"
+SUBSYSTEM=="drm", KERNEL=="card0", MODE="0660"
+
+# 2026-09-18 night fix: mutter (unlike labwc/wlroots) enumerates DRM cards via
+# g_udev_enumerator_add_match_tag(enumerator, "seat") (meta-udev.c,
+# meta_udev_list_drm_devices) -- a tag real systems get for free from
+# systemd's own 71-seat.rules, which this minimal chroot rule set never
+# included. Without it mutter finds zero candidate GPUs ("Failed to setup:
+# No GPUs found") even though the node exists and passes every other check
+# in meta_udev_is_drm_device(). Database-only (TAG+= never touches file
+# mode/owner), same safety envelope as the MODE= line above.
+SUBSYSTEM=="drm", KERNEL=="card0", TAG+="seat"

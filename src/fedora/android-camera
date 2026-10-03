@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""android-camera on [front|back|0-3] | off | status | list — Android's camera as a PipeWire camera in GNOME (2026-09-27).
+Android keeps the camera stack: the Android bridge starts the open-source scrcpy server (camera -> H.264 on an
+abstract socket); here it is decoded (openh264) into a PipeWire Video/Source node with media.role=Camera, which
+Snapshot / Firefox / portal apps list as a camera. Only runs while switched on (Android shows its camera indicator)."""
+import os, signal, socket, subprocess, sys, time
+sys.path.insert(0, "/usr/local/bin")
+import importlib.machinery, importlib.util
+_l = importlib.machinery.SourceFileLoader("android_bt", "/usr/local/bin/android-bt")
+_s = importlib.util.spec_from_loader("android_bt", _l); bridge = importlib.util.module_from_spec(_s); _l.exec_module(bridge)
+SOCK = "\0scrcpy_6e6f7630"
+PIDF = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "android-camera.pid")
+# 2026-09-27: leaky queue AFTER the decoder. pipewiresink blocks in its buffer-pool acquire whenever the consumer
+# (Snapshot/browser/pipewiresrc) is slow, paused or has just disconnected; that back-pressure reached the scrcpy
+# socket -> encoder input surface full -> camera HAL "requestStreamBuffers ... timed out" -> "Camera capture
+# failed" (reproduced in plain Android with SF running by stalling the reader; the ADL "failed to mmap working
+# buffer" log line also appears in normal working captures and is NOT the cause). Dropping decoded frames keeps
+# the H.264 stream (and its reference frames) intact; dropping before the decoder would corrupt it.
+PIPE = ("gst-launch-1.0 -q fdsrc fd=0 ! h264parse ! openh264dec ! "
+        "queue leaky=downstream max-size-buffers=2 max-size-bytes=0 max-size-time=0 ! "
+        "videoconvert ! video/x-raw,format=I420 ! "
+        "pipewiresink mode=provide client-name=android-camera "
+        "stream-properties=\"props,media.class=Video/Source,media.role=Camera,node.name=android-camera,"
+        "node.description=Android-camera\"")
+
+def running():
+    try:
+        pid = int(open(PIDF).read()); os.kill(pid, 0); return pid
+    except (OSError, ValueError):
+        return None
+
+def feed(out):
+    """Connect to the scrcpy server socket and copy the raw H.264 stream to `out` until it closes."""
+    for _ in range(40):
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(SOCK); break
+        except OSError:
+            time.sleep(0.25)
+    else:
+        sys.exit("camera stream did not come up")
+    while (d := s.recv(1 << 16)):
+        out.write(d)
+
+def on(facing):
+    if running():
+        off(quiet=True)
+    r = bridge.request("cam-" + facing).strip()
+    if r != "ok":
+        sys.exit("android bridge: " + r)
+    pid = os.fork()
+    if pid == 0:                                   # child: reader | gst pipeline, in its own process group
+        os.setsid()
+        # detach from the caller's terminal/pipes (a launcher or $(...) must not wait for the stream to end)
+        nul = os.open(os.devnull, os.O_RDWR)
+        logf = os.open("/tmp/android-camera.log",
+                       os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.dup2(nul, 0); os.dup2(logf, 1); os.dup2(logf, 2)
+        gst = subprocess.Popen(PIPE, shell=True, stdin=subprocess.PIPE)
+        try:
+            feed(gst.stdin)
+        except (BrokenPipeError, OSError):
+            pass
+        gst.terminate(); os._exit(0)
+    open(PIDF, "w").write(str(pid))
+    print(f"Android camera {facing} on — pick 'Android camera' in Snapshot or your browser. Stop: android-camera off")
+
+def off(quiet=False):
+    pid = running()
+    if pid:
+        try: os.killpg(pid, signal.SIGTERM)
+        except OSError: pass
+    try: os.unlink(PIDF)
+    except OSError: pass
+    bridge.request("cam-stop")
+    if not quiet: print("Android camera off")
+
+if __name__ == "__main__":
+    a = sys.argv[1:] or ["status"]
+    try:
+        if a[0] == "on": on(a[1] if len(a) > 1 and a[1] in ("front", "back", "0", "1", "2", "3") else "front")
+        elif a[0] == "list": print(bridge.request("cam-list").strip() or "no cameras reported")
+        elif a[0] == "off": off()
+        elif a[0] == "status": print("on" if running() else "off")
+        else: sys.exit(__doc__)
+    except RuntimeError as e:
+        sys.exit(str(e))

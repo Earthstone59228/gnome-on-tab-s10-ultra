@@ -1,0 +1,31 @@
+#!/bin/sh
+# Run a desktop-OpenGL (2.1) app on the Mali GPU: gl4es translates GL -> GLES2, its EGL wrapper
+# maps EGL_OPENGL_API/EGL_OPENGL_BIT to ES2, real EGL is the libhybris Mali stack.
+# Usage: mali-gl [--offscreen] PROGRAM [ARGUMENT...]
+set -eu
+if [ "${1-}" = --offscreen ]; then
+    export HYBRIS_EGLPLATFORM=null
+    shift
+elif [ -n "${WAYLAND_DISPLAY-}" ]; then
+    export HYBRIS_EGLPLATFORM=wayland
+    export GDK_BACKEND=wayland
+    export QT_QPA_PLATFORM=wayland
+else
+    export HYBRIS_EGLPLATFORM=null
+fi
+if [ "$#" -eq 0 ]; then
+    echo 'Usage: mali-gl [--offscreen] PROGRAM [ARGUMENT...]' >&2
+    exit 2
+fi
+H=/usr/local/lib/hybris-wl
+export LD_LIBRARY_PATH="/usr/local/lib/gl4es:/usr/local/lib/hybris-vendor:$H${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LIBGL_EGL="$H/libEGL.so.1"
+export LIBGL_GLES="$H/libGLESv2.so.2"
+export LIBEGL=/usr/local/lib/hybris-vendor/libGLES_mali.so
+export LIBGLESV2=/usr/local/lib/hybris-vendor/libGLES_mali.so
+export LIBGL_ES=2
+export LIBGL_DEFER_HWTEST=1
+export HYBRIS_LOGGING_TARGET=stderr HYBRIS_LOGGING_LEVEL=warning
+export LD_PRELOAD="/usr/local/lib/libtls-padding.so${LD_PRELOAD:+:$LD_PRELOAD}"
+unset LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER __EGL_VENDOR_LIBRARY_FILENAMES
+exec "$@"

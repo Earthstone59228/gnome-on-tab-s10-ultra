@@ -1,0 +1,26 @@
+#!/bin/sh
+# Run a GLES-capable app (GTK4, Qt, Godot, Firefox...) on the Mali GPU through libhybris/glvnd.
+# Same environment the GNOME session hands its children. Usage: mali-gles [--offscreen] PROGRAM [ARG...]
+set -eu
+if [ "${1-}" = --offscreen ]; then
+    export HYBRIS_EGLPLATFORM=null
+    shift
+elif [ -n "${WAYLAND_DISPLAY-}" ]; then
+    export HYBRIS_EGLPLATFORM=wayland
+    export GDK_BACKEND=wayland QT_QPA_PLATFORM=wayland SDL_VIDEODRIVER=wayland
+    export QT_OPENGL=es2 GSK_RENDERER=gl
+else
+    export HYBRIS_EGLPLATFORM=null
+fi
+if [ "$#" -eq 0 ]; then
+    echo 'Usage: mali-gles [--offscreen] PROGRAM [ARGUMENT...]' >&2
+    exit 2
+fi
+export LD_LIBRARY_PATH="/usr/local/lib/hybris-vendor:/usr/local/lib/hybris-wl${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/local/share/glvnd/egl_vendor.d/10_libhybris.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json
+export LIBEGL=/usr/local/lib/hybris-vendor/libGLES_mali.so
+export LIBGLESV2=/usr/local/lib/hybris-vendor/libGLES_mali.so
+export HYBRIS_LOGGING_TARGET=stderr HYBRIS_LOGGING_LEVEL=warning
+export LD_PRELOAD="/usr/local/lib/libtls-padding.so${LD_PRELOAD:+:$LD_PRELOAD}"
+unset LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER
+exec "$@"

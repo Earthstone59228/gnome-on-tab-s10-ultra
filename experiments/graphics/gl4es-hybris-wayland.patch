@@ -1,0 +1,229 @@
+diff --git a/src/egl/egl.c b/src/egl/egl.c
+index ec1e920..ec1cf79 100644
+--- a/src/egl/egl.c
++++ b/src/egl/egl.c
+@@ -1,7 +1,9 @@
++#include <stdlib.h>
+ 
+ #include "egl.h"
+ #include "../gl/loader.h"
+ #include "../glx/hardext.h"
++extern void glFlush(void);
+ 
+ #ifndef AliasExport
+ #define AliasExport(name)   __attribute__((alias(name))) __attribute__((visibility("default")))
+@@ -48,6 +50,21 @@ EGLBoolean gl4es_eglGetConfigs(EGLDisplay dpy, EGLConfig *configs, EGLint config
+ 
+ EGLBoolean gl4es_eglChooseConfig(EGLDisplay dpy, const EGLint *attrib_list, EGLConfig *configs, EGLint config_size, EGLint *num_config) {
+     LOAD_EGL(eglChooseConfig);
++    /* Desktop-GL apps ask for EGL_OPENGL_BIT; the GLES-only driver only has ES bits. */
++    EGLint fixed[128];
++    if (attrib_list) {
++        int i = 0;
++        while (attrib_list[i] != EGL_NONE && i < 120) {
++            fixed[i] = attrib_list[i]; fixed[i+1] = attrib_list[i+1];
++            if (fixed[i] == EGL_RENDERABLE_TYPE || fixed[i] == EGL_CONFORMANT) {
++                if (fixed[i+1] & EGL_OPENGL_BIT)
++                    fixed[i+1] = (fixed[i+1] & ~EGL_OPENGL_BIT) | EGL_OPENGL_ES2_BIT;
++            }
++            i += 2;
++        }
++        fixed[i] = EGL_NONE;
++        attrib_list = fixed;
++    }
+     return egl_eglChooseConfig(dpy, attrib_list, configs, config_size, num_config);
+ }
+ 
+@@ -146,7 +163,11 @@ EGLBoolean gl4es_eglDestroyContext(EGLDisplay dpy, EGLContext ctx) {
+ 
+ EGLBoolean gl4es_eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLContext ctx) {
+     LOAD_EGL(eglMakeCurrent);
+-    return egl_eglMakeCurrent(dpy, draw, read, ctx);
++    if (eglGetCurrentContext() != EGL_NO_CONTEXT) glFlush();
++    EGLBoolean ret = egl_eglMakeCurrent(dpy, draw, read, ctx);
++    if (ret && ctx != EGL_NO_CONTEXT && getenv("LIBGL_DEFER_HWTEST"))
++        GetHardwareExtensionsCurrent();
++    return ret;
+ }
+ 
+ EGLContext gl4es_eglGetCurrentContext(void) {
+@@ -191,6 +212,7 @@ EGLBoolean gl4es_eglWaitNative(EGLint engine) {
+ 
+ EGLBoolean gl4es_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
+     LOAD_EGL(eglSwapBuffers);
++    if (eglGetCurrentContext() != EGL_NO_CONTEXT) glFlush();
+     return egl_eglSwapBuffers(dpy, surface);
+ }
+ 
+diff --git a/src/gl/init.c b/src/gl/init.c
+index 7526d91..332b717 100644
+--- a/src/gl/init.c
++++ b/src/gl/init.c
+@@ -250,6 +250,7 @@ void initialize_gl4es() {
+         break;
+     }
+ 
++    if(getenv("LIBGL_DEFER_HWTEST")) gl4es_notest = 1;
+     GetHardwareExtensions(gl4es_notest);
+ 
+ #if !defined(NO_LOADER) && !defined(NO_GBM)
+diff --git a/src/glx/glx.c b/src/glx/glx.c
+index 1ba4fd7..0d6b732 100644
+--- a/src/glx/glx.c
++++ b/src/glx/glx.c
+@@ -90,6 +90,7 @@ typedef struct {
+     int Type;
+     GC gc; 
+     XImage* frame;
++    int CapW, CapH;   /* real EGL pbuffer size when larger than the emulated window (Width/Height) */
+ } glx_buffSize;
+ 
+ //PBuffer should work under ANDROID / NOX11
+@@ -1309,10 +1310,18 @@ Bool gl4es_glXMakeCurrent(Display *display,
+                     //let's create a PBuffer attributes
+                     EGLint egl_attribs[10];	// should be enough
+                     int i = 0;
++                    unsigned int pbw = width, pbh = height;
++                    {
++                        const char *cap = getenv("LIBGL_PBUFMAX");   /* "WxH", default 3072x2048 */
++                        unsigned int cw = 3072, ch = 2048;
++                        if(cap) sscanf(cap, "%ux%u", &cw, &ch);
++                        if(pbw < cw) pbw = cw;
++                        if(pbh < ch) pbh = ch;
++                    }
+                     egl_attribs[i++] = EGL_WIDTH;
+-                    egl_attribs[i++] = width;
++                    egl_attribs[i++] = pbw;
+                     egl_attribs[i++] = EGL_HEIGHT;
+-                    egl_attribs[i++] = height;
++                    egl_attribs[i++] = pbh;
+                     egl_attribs[i++] = EGL_NONE;
+ 
+                     if(createPBuffer(display, egl_attribs, &eglSurf, &eglCtx, &eglConfig, (depth>16)?8:5, (depth==15)?5:(depth>16)?8:6, (depth>16)?8:5, (depth==32)?8:0, context->samplebuffers, context->samples)==0) {
+@@ -1326,7 +1335,9 @@ Bool gl4es_glXMakeCurrent(Display *display,
+                     egl_eglQuerySurface(eglDisplay,eglSurf,EGL_HEIGHT,&Height);
+                     DBG(printf("New surface %p is %dx%d\n", eglSurf, Width, Height);)
+ 
+-                    addPixBuffer(display, eglSurf, eglConfig, Width, Height, eglCtx, drawable, depth, 2);
++                    addPixBuffer(display, eglSurf, eglConfig, width, height, eglCtx, drawable, depth, 2);
++                    pbuffersize[pbufferlist_size-1].CapW = Width;
++                    pbuffersize[pbufferlist_size-1].CapH = Height;
+                     context->eglSurface = eglSurf;
+                     if(context->eglContext && context->eglContext!=eglCtx) {
+                         // remove old context before putting PBuffer specific one
+@@ -2766,6 +2777,14 @@ void BlitEmulatedPixmap(int win) {
+         Window root;
+         int x, y;
+         XGetGeometry(dpy, drawable, &root, &x, &y, &width, &height, &border, &depth);
++        if((width!=Width || height!=Height) && buff->CapW && (int)width<=buff->CapW && (int)height<=buff->CapH) {
++            /* fits in the big pbuffer: no EGL change, just re-read a different window-sized corner */
++            XSync(dpy, False);
++            if(frame) XDestroyImage(frame);
++            buff->frame = frame = 0;
++            buff->Width = Width = width;
++            buff->Height = Height = height;
++        } else
+         if(width!=Width || height!=Height /*|| depth!=Depth*/) {
+             LOAD_EGL(eglDestroySurface);
+             LOAD_EGL(eglMakeCurrent);
+@@ -2812,6 +2831,10 @@ void BlitEmulatedPixmap(int win) {
+             buff->Width = width;
+             buff->Height = height;
+             //buff->Depth = depth;
++            if(getenv("GL4ES_BLITLOG")) fprintf(stderr,"BLIT recreate %dx%d -> %dx%d win=%lx\n",Width,Height,(int)width,(int)height,(unsigned long)drawable);
++            /* The frame just rendered went into the old-size pbuffer and is dropped; ask the app to repaint. */
++            XClearArea(dpy, (Window)drawable, 0, 0, 0, 0, True);
++            XFlush(dpy);
+             return;
+         }
+     }
+@@ -2864,6 +2887,8 @@ void BlitEmulatedPixmap(int win) {
+ #endif
+     gl4es_glReadPixels(0, 0, Width, Height, (Depth==16)?GL_RGB:GL_BGRA, (Depth==16)?GL_UNSIGNED_SHORT_5_6_5:GL_UNSIGNED_BYTE, (void*)pix);
+ 
++    if(getenv("GL4ES_BLITLOG")) { unsigned int *px=(unsigned int*)pix; fprintf(stderr,"BLIT copy %dx%d win=%lx center=%08x corner=%08x mid=%08x\n",Width,Height,(unsigned long)drawable,px[(Height/2)*Width+Width/2],px[0],px[(Height/3)*Width+Width/3]); }
++    if(getenv("GL4ES_BLITDUMP")) { static int n=0; char nm[256]; snprintf(nm,sizeof(nm),"%s.%d.ppm",getenv("GL4ES_BLITDUMP"),(++n)%6); FILE*f=fopen(nm,"wb"); if(f){ fprintf(f,"P6\n%d %d\n255\n",Width,Height); unsigned char *b=(unsigned char*)pix; for(int y=Height-1;y>=0;y--) for(int x=0;x<Width;x++){ unsigned char *q=b+((size_t)y*Width+x)*4; fputc(q[2],f);fputc(q[1],f);fputc(q[0],f);} fclose(f);} }
+     actualBlit(reverse, Width, Height, Depth, dpy, drawable, gc, frame, pix, tmp);
+ 
+ }
+diff --git a/src/glx/hardext.c b/src/glx/hardext.c
+index c89a123..3089fc4 100644
+--- a/src/glx/hardext.c
++++ b/src/glx/hardext.c
+@@ -88,6 +88,17 @@ static int testTextureCubeLod() {
+     return compiled;
+ }
+ 
++static int use_current = 0;
++EXPORT void GetHardwareExtensions(int notest);
++EXPORT
++void GetHardwareExtensionsCurrent(void)
++{
++    if(tested) return;
++    use_current = 1;
++    GetHardwareExtensions(0);
++    use_current = 0;
++}
++
+ EXPORT
+ void GetHardwareExtensions(int notest)
+ {
+@@ -155,6 +166,11 @@ void GetHardwareExtensions(int notest)
+     EGLSurface eglSurface;
+     EGLContext eglContext;
+ 
++    LOAD_EGL(eglGetCurrentDisplay);
++    if(use_current) {
++        eglDisplay = egl_eglGetCurrentDisplay();
++        eglSurface = EGL_NO_SURFACE; eglContext = EGL_NO_CONTEXT;
++    } else {
+     SHUT_LOGD("Using GLES %s backend\n", (hardext.esversion==1)?"1.1":"2.0");
+ 
+     // Create a PBuffer first...
+@@ -262,6 +278,7 @@ void GetHardwareExtensions(int notest)
+         return;
+     }
+     egl_eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext);
++    }
+ #endif
+     tested = 1;
+     LOAD_GLES(glGetString);
+@@ -284,6 +301,14 @@ void GetHardwareExtensions(int notest)
+         hardext.drawbuffers = 1;
+     } else {
+         S("GL_EXT_draw_buffers ", drawbuffers, 1);
++        if(!hardext.drawbuffers) {
++            /* an ES2 context on a GLES 3.x driver still has multiple render targets in core */
++            const char *glver = (const char *) gles_glGetString(GL_VERSION);
++            if(glver && strstr(glver, "OpenGL ES 3")) {
++                hardext.drawbuffers = 1;
++                SHUT_LOGD("Draw buffers available through GLES 3.x core, and so used\n");
++            }
++        }
+     }
+     /*if(hardext.blendcolor==0) {
+         // try by just loading the function
+@@ -484,10 +509,12 @@ void GetHardwareExtensions(int notest)
+     }
+ 
+     // End, cleanup
++    if(!use_current) {
+     egl_eglMakeCurrent(eglDisplay, 0, 0, EGL_NO_CONTEXT);
+     egl_eglDestroySurface(eglDisplay, eglSurface);
+     egl_eglDestroyContext(eglDisplay, eglContext);
+ 
+     egl_eglTerminate(eglDisplay);
++    }
+ #endif
+ }
+diff --git a/src/glx/hardext.h b/src/glx/hardext.h
+index 05738fb..0cf32b1 100644
+--- a/src/glx/hardext.h
++++ b/src/glx/hardext.h
+@@ -77,5 +77,6 @@ typedef struct _hardext {
+ EXPORT extern hardext_t hardext;
+ 
+ EXPORT void GetHardwareExtensions(int test);
++EXPORT void GetHardwareExtensionsCurrent(void);
+ 
+ #endif

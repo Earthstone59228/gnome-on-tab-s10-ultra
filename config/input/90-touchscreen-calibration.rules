@@ -1,0 +1,10 @@
+# sec_touchscreen (event4) raw ABS_X/ABS_Y is native-portrait (0-1847/0-2959)
+# but the compositor's DRM mode is native-landscape (2960x1848) -- X/Y are
+# crossed between digitizer and scanout. Live-verified 2026-09-18: left/right
+# finger motion -> up/down cursor, up/down finger motion -> right/left
+# (mirrored) cursor -- a 90 degree clockwise rotation. libinput's quirks-file
+# system has no CalibrationMatrix key in this build (verified via strings on
+# libinput.so.10 -- only LIBINPUT_CALIBRATION_MATRIX exists, as a udev ENV
+# property, not a quirks Attr*); this must be set here, not in
+# local-overrides.quirks.
+ACTION=="add|change", KERNEL=="event*", ATTRS{name}=="sec_touchscreen", ENV{LIBINPUT_CALIBRATION_MATRIX}="0 1 0 -1 0 1"

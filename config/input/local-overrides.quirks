@@ -1,0 +1,9 @@
+# Samsung S Pen (sec_e-pen, event8) — kernel driver reports resolution=0 in
+# absinfo, which libinput requires for tablet devices (evdev_device_get_size).
+# The digitizer maps 1:1 to the native-portrait panel (19589x31376 units over
+# ~196x314 mm) -> isotropic ~100 units/mm. AttrResolutionHint supplies it
+# via libinput's own sanctioned override path (evdev_fix_abs_resolution).
+[Samsung S Pen]
+MatchUdevType=tablet
+MatchName=sec_e-pen
+AttrResolutionHint=100x100

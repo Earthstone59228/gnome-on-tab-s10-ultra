@@ -1,0 +1,7 @@
+{
+  "uuid": "screen-blank@fedora-tab",
+  "name": "Screen blank (Tab S10 Ultra)",
+  "description": "Power button / book cover: pure-black fullscreen layer instead of a panel power-down (which detaches the pogo keyboard and crash-loops Android's WindowManager).",
+  "shell-version": ["50"],
+  "session-modes": ["user", "unlock-dialog"]
+}

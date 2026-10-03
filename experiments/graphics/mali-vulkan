@@ -1,0 +1,29 @@
+#!/bin/sh
+# Opt-in Vulkan loader for the rooted Galaxy Tab S10 Ultra Fedora chroot.
+# Default to Wayland when a session display is present; --offscreen selects null.
+set -eu
+if [ "${1-}" = --offscreen ]; then
+    export HYBRIS_VULKANPLATFORM=null
+    export HYBRIS_EGLPLATFORM=null
+    shift
+elif [ -n "${WAYLAND_DISPLAY-}" ]; then
+    export HYBRIS_VULKANPLATFORM=wayland
+    export HYBRIS_EGLPLATFORM=wayland
+else
+    export HYBRIS_VULKANPLATFORM=null
+    export HYBRIS_EGLPLATFORM=null
+fi
+if [ "$#" -eq 0 ]; then
+    echo 'Usage: mali-vulkan [--offscreen] PROGRAM [ARGUMENT...]' >&2
+    exit 2
+fi
+MALI_VK_DIR=/usr/local/lib/mali-vulkan
+export LD_LIBRARY_PATH="$MALI_VK_DIR:/usr/local/lib/hybris-wl${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export HYBRIS_LD_LIBRARY_PATH="$MALI_VK_DIR/android:/usr/local/lib/hybris-vendor"
+export LIBVULKAN="$MALI_VK_DIR/android/libvulkan-android.so"
+export HYBRIS_VULKANPLATFORM_DIR="$MALI_VK_DIR"
+export LIBEGL=/usr/local/lib/hybris-vendor/libGLES_mali.so
+export LIBGLESV2=/usr/local/lib/hybris-vendor/libGLES_mali.so
+export LD_PRELOAD="/usr/local/lib/libtls-padding.so${LD_PRELOAD:+:$LD_PRELOAD}"
+unset LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER
+exec "$@"

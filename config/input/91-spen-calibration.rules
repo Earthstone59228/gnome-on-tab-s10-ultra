@@ -1,0 +1,8 @@
+# sec_e-pen (event8) S Pen EMR digitizer: same portrait-vs-landscape 90
+# rotation as the touchscreen, derived from a real labeled getevent capture
+# (spen-corner-capture-20260921.log: L->R stroke = pure +rawY, T->B stroke =
+# pure -rawX, corner taps confirm). Matrix identical to the touchscreen's
+# 90-touchscreen-calibration.rules; libinput normalizes each ABS axis by its
+# own min/max so the pen's larger raw ranges (19589x31376 vs 1848x2960)
+# need no scaling. Live verification in a GNOME session still pending.
+ACTION=="add|change", KERNEL=="event*", ATTRS{name}=="sec_e-pen", ENV{LIBINPUT_CALIBRATION_MATRIX}="0 1 0 -1 0 1"

@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""fake-gdm-recovery set   — generate a new 32-digit recovery code, print it ONCE, store only its scrypt hash.
+fake-gdm-recovery unlock  — read a code from stdin and hand it to fake_gdm (unlocks the GNOME lock screen)."""
+import hashlib, os, secrets, sys
+HASH = "/etc/fake-gdm/recovery"
+RECOVER = "/run/fake-gdm/recover"
+if len(sys.argv) != 2 or sys.argv[1] not in ("set", "unlock"):
+    sys.exit(__doc__)
+if os.geteuid() != 0:
+    sys.exit("run as root")
+if sys.argv[1] == "set":
+    code = "".join(secrets.choice("0123456789") for _ in range(32))
+    salt = secrets.token_bytes(16)
+    n, r, p = 2 ** 15, 8, 1
+    h = hashlib.scrypt(code.encode(), salt=salt, n=n, r=r, p=p, maxmem=64 * 1024 * 1024, dklen=32).hex()
+    os.makedirs(os.path.dirname(HASH), mode=0o700, exist_ok=True)
+    tmp = HASH + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(f"scrypt${n}${r}${p}${salt.hex()}${h}\n")
+    os.replace(tmp, HASH)
+    print("Recovery code (shown once — save it, it is not stored anywhere):")
+    print(" ".join(code[i:i + 4] for i in range(0, 32, 4)))
+else:
+    code = "".join(ch for ch in sys.stdin.read() if ch.isdigit())
+    if len(code) != 32:
+        sys.exit("need 32 digits on stdin")
+    def gdm_running():
+        for p in os.listdir("/proc"):
+            try:
+                if p.isdigit() and b"fake_gdm.py" in open(f"/proc/{p}/cmdline", "rb").read():
+                    return True
+            except OSError:
+                pass
+        return False
+    if not gdm_running() or not os.path.isdir(os.path.dirname(RECOVER)):
+        sys.exit("fake_gdm is not running: nothing to unlock (the code was not written anywhere)")
+    tmp = RECOVER + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(code)
+    os.replace(tmp, RECOVER)
+    print("code handed to fake_gdm; see /fake-gdm.log")

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Bluetooth (Android)
+Comment=Turn Android Bluetooth on or off and see paired devices
+Exec=/usr/local/bin/android-bluetooth-app
+Icon=bluetooth-active-symbolic
+Categories=Settings;HardwareSettings;

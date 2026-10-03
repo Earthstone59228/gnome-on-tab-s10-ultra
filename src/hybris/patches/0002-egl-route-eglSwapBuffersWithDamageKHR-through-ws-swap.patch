@@ -1,0 +1,15 @@
+diff --git a/hybris/egl/egl.c b/hybris/egl/egl.c
+index 0051d37..7e7dcb0 100644
+--- a/hybris/egl/egl.c
++++ b/hybris/egl/egl.c
+@@ -551,6 +551,10 @@ struct FuncNamePair {
+ static struct FuncNamePair _eglHybrisOverrideFunctions[] = {
+ 	OVERRIDE_MY(eglCreateImageKHR),
+ 	OVERRIDE_MY(eglSwapBuffersWithDamageEXT),
++	/* The Mali blob also exports the KHR name (same signature). Apps that use it (Firefox
++	 * WebRender) must go through the ws prepareSwap/finishSwap too, or the Wayland platform
++	 * never attaches/commits the buffer and dequeueBuffer eventually blocks forever. */
++	OVERRIDE_TO(eglSwapBuffersWithDamageKHR, _my_eglSwapBuffersWithDamageEXT),
+ 	OVERRIDE_MY(glEGLImageTargetTexture2DOES),
+ 	OVERRIDE_MY(glEGLImageTargetRenderbufferStorageOES),
+ 	OVERRIDE_MY(eglDestroyImageKHR),
