@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt GDK_BACKEND=x11 ZINK_DISABLE_OVERRIDE=1
+LOG=${XDG_CACHE_HOME:-$HOME/.cache}/orcaslicer-zink.log
+mkdir -p "$(dirname "$LOG")"
+if [ -f "$LOG" ] && [ "$(wc -c <"$LOG")" -gt 16777216 ]; then mv -f "$LOG" "$LOG.1"; fi
+exec /bin/sh /opt/galaxy-zink-20261005/zink-env gpu \
+ /opt/orcaslicer/squashfs-root/AppRun "$@" >>"$LOG" 2>&1

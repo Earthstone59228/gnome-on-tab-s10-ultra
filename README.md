@@ -6,7 +6,7 @@ Root access was achieved using Ghostlock ([Root My Galaxy](https://github.com/Bu
 
 ## Current status
 
-Tested on SM-X926B with firmware X926BXXS9DZG1 and kernel 6.1.145. A usable GNOME desktop works with GPU-accelerated GNOME Shell, touch, S Pen, keyboard, Wi-Fi, audio, camera, and the Android display restore path. OpenGL and Vulkan applications are currently broken in general. Limited gl4es (OpenGL 2.1) and MobileGL (GL 3.3 core, one real application) tests work in isolated displays; see [`experiments/graphics`](experiments/graphics). This is a working personal port, not a general installer for other firmware or tablet variants.
+Tested on SM-X926B with firmware X926BXXS9DZG1 and kernel 6.1.145. A usable GNOME desktop works with GPU-accelerated GNOME Shell, touch, S Pen, keyboard, Wi-Fi, audio, camera, and the Android display restore path. Desktop OpenGL 4.6 and Vulkan work for apps launched through the Zink-over-PanVK wrappers (OrcaSlicer, Blender; PanVK is experimental and Blender still has a widget glitch). Earlier gl4es and MobileGL tests are superseded; see [`experiments/graphics`](experiments/graphics) and [`docs/PROGRESS-2026-10-04-to-07.md`](docs/PROGRESS-2026-10-04-to-07.md). The power button does not suspend the tablet yet; a deep-sleep attempt panicked the kernel ([`experiments/power`](experiments/power)). This is a working personal port, not a general installer for other firmware or tablet variants.
 
 ## What is here
 

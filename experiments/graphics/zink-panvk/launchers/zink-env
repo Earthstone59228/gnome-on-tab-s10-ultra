@@ -1,0 +1,18 @@
+#!/bin/sh
+# Process-local Mesa/Zink selection; retains DISPLAY for the isolated X server.
+set -eu
+mode=$1
+shift
+case "$mode" in
+ gpu) icd=/opt/panvk-unaudited-20261004/candidate-aafix/icd.json; soft=0 ;;
+ control) icd=/usr/share/vulkan/icd.d/lvp_icd.aarch64.json; soft=1 ;;
+ *) exit 2 ;;
+esac
+exec /usr/bin/env -u LD_LIBRARY_PATH -u LD_PRELOAD -u LIBEGL -u LIBGLESV2 -u LIBVULKAN \
+ -u EGL_PLATFORM -u WAYLAND_DISPLAY -u VK_ICD_FILENAMES -u VK_ADD_DRIVER_FILES \
+ -u VK_LOADER_DRIVERS_SELECT -u VK_LOADER_DRIVERS_DISABLE \
+ __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
+ __GLX_VENDOR_LIBRARY_NAME=mesa VK_DRIVER_FILES="$icd" VK_LOADER_LAYERS_DISABLE='~implicit~' \
+ PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1 PANVK_KBASE_DRI3=0 \
+ MESA_LOADER_DRIVER_OVERRIDE=zink GALLIUM_DRIVER=zink LIBGL_ALWAYS_SOFTWARE="$soft" \
+ LIBGL_KOPPER_DRI2=true "$@"

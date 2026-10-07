@@ -1,0 +1,12 @@
+#!/bin/sh
+# OpenSCAD on the Mali via Zink/PanVK (2026-10-06, UN-AUDITED). Replaces mali-gl-x11 (gl4es).
+# Opt-out to software: touch /usr/local/etc/no-zink-openscad
+export QT_QPA_PLATFORM=xcb GDK_BACKEND=x11 ZINK_DISABLE_OVERRIDE=1
+if [ -f /usr/local/etc/no-zink-openscad ]; then
+    export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
+    exec /usr/bin/openscad "$@"
+fi
+LOG=${XDG_CACHE_HOME:-$HOME/.cache}/openscad-zink.log
+mkdir -p "$(dirname "$LOG")"
+if [ -f "$LOG" ] && [ "$(wc -c <"$LOG")" -gt 16777216 ]; then mv -f "$LOG" "$LOG.1"; fi
+exec /bin/sh /opt/galaxy-zink-20261005/zink-env gpu /usr/bin/openscad "$@" >>"$LOG" 2>&1

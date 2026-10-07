@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+ROOT=/opt/galaxy-zink-20261005
+LOG=${XDG_CACHE_HOME:-$HOME/.cache}/blender-zink.log
+mkdir -p "$(dirname "$LOG")"
+if [ -f "$LOG" ] && [ "$(wc -c <"$LOG")" -gt 16777216 ]; then mv -f "$LOG" "$LOG.1"; fi
+# A nonexistent Wayland socket makes Blender select the tested X11 path.
+export WAYLAND_DISPLAY=galaxy-zink-x11-only-no-socket
+# zink-env clears WAYLAND_DISPLAY; reapply after environment selection.
+exec /bin/sh "$ROOT/zink-env" gpu /usr/bin/env \
+ WAYLAND_DISPLAY=galaxy-zink-x11-only-no-socket \
+ /usr/bin/blender --gpu-backend opengl "$@" >>"$LOG" 2>&1
