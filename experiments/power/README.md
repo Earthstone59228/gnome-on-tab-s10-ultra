@@ -21,3 +21,5 @@ Samsung's kernel source explains the failure: the MediaTek DRM PM notifier block
 ## Key-state guard (added after the chord-asleep failure)
 
 `keystate.py` samples the key-state bitmap (same ioctl as the panic-chord watcher: no event reads, no grabs) for VOL UP (`gpio-keys`), VOL DOWN and POWER (`mtk-pmic-keys`). The sleep helper runs it before blanking (refuses to sleep if the state is unreadable), before every suspend, and after every resume; any held key ends the sleep. Hardware facts from the device tree: VOL UP and POWER are wake sources, VOL DOWN (the PMIC `home` node) is not, so the chord wakes the tablet through VOL UP and is then seen as held. A fresh audit caught a function-order bug (the precheck called the sampler before it was defined) that the syntax check could not. Not yet verified live.
+
+Live result (Oct 7): with the guard, the panic chord works while the tablet sleeps. VOL UP (`gpio-keys`) wakes it (wake reason `255 Volume_Up`), the guard sees both keys held and ends the sleep, and the normal chord watcher then ends the session. VOL DOWN alone is not a wake source. The power-button wake path is not verified yet.
