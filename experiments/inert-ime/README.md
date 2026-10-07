@@ -6,8 +6,10 @@ handwriting support and creates no window; the original keyboard is snapshotted 
 
 Status (2026-10-07): built, audited three times, and the supervised Android-only admission test
 PASSED on a device (inert IME bound, killed, rebound as a new process, original keyboard restored,
-exact settings restored, system_server unchanged). Not done: integration into the session launcher
-(`stage/install-dummy-ime.sh`) and any SF-off test. Never run stages with GNOME active.
+exact settings restored, system_server unchanged). A separate integration audit approved
+`stage/install-dummy-ime.sh`; it was installed and a supervised 2-minute GNOME session completed
+cleanly (IME selected, SF stopped, restored, snapshots cleared, watchdog dismissed). Not yet
+soaked over long sessions or under real memory pressure. Never run stages with GNOME active.
 
 Live bugs the host tests and first audits missed (all fixed, now covered by on-device checks):
 - Android mksh marks `exec 9>file` close-on-exec; toybox `flock` is fd-only -> lock is now a
