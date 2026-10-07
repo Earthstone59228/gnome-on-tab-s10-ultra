@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# AUDITED GO-WITH-CHANGES 2026-10-07 (changes applied). Test D: suspend the way stock Android does -- display OFF first, then s2idle.
+# 2026-10-07: audited twice (GO-WITH-CHANGES, applied); key-state guard audit found+fixed a function-order bug. Test D: suspend the way stock Android does -- display OFF first, then s2idle.
 # Why (Samsung kernel source, mtk_drm_drv.c): mtk_drm_sys_suspend() runs drm_atomic_helper_suspend() only if a CRTC
 # wakelock (disp_crtc0_wakelock) is still active; the PM notifier has already set kernel_pm.status=SUSPEND, which makes
 # mtk_atomic_commit() block -> self-deadlock (test A, softdog panic). mutter PowerSaveMode=3 does a blocking atomic
@@ -17,6 +17,7 @@ DPMS=/sys/class/drm/card0-DSI-1/dpms
 log() { echo "$(date +%T) D: $*" >> "$L"; }
 wkoff() { timeout 3 cat /proc/mtkfb 2>/dev/null | grep -q 'CRTC0 wk active:0'; }
 ready() { [ "$(cat $DPMS)" = Off ] && wkoff; }
+keyheld() { timeout 5 chroot "$R" /usr/bin/python3 /usr/local/bin/keystate.py 2>/dev/null; }
 
 GS=""
 for p in $(pgrep -x gnome-shell); do [ "$(readlink /proc/$p/root)" = "$R" ] && GS=$p; done
@@ -34,6 +35,10 @@ log "start gs=$GS secs=$SECS dpms=$(cat $DPMS) wk=$(timeout 3 grep -o 'CRTC0 wk 
 trap cleanup EXIT
 trap '' HUP
 trap 'exit 1' INT TERM
+
+# precheck: key state must be readable (rc 1 = readable, nothing held) or we refuse to blank/sleep at all
+KH=$(keyheld); KRC=$?
+[ "$KRC" = 1 ] || { log "keystate precheck rc=$KRC [$KH], abort (no sleep)"; exit 1; }
 
 psm 3
 i=0
@@ -60,6 +65,8 @@ while :; do
 	try=0
 	while [ $try -lt 40 ]; do
 		ready || { log "display/wakelock came back before suspend (try $try), abort"; exit 1; }
+		KH=$(keyheld); KRC=$?
+		[ "$KRC" = 1 ] || { log "KEY state before suspend rc=$KRC [$KH] -> ending sleep"; break 2; }
 		echo mem > /sys/power/state 2>>"$L"
 		rc=$?
 		[ "$rc" = 0 ] && break
@@ -73,6 +80,9 @@ while :; do
 	[ "$rc" = 0 ] || break
 	# FAIL-SAFE: keep sleeping only through known-benign wakes. Any other reason (buttons incl. VOL UP = panic chord,
 	# power key, touch, cover, unknown) ends the sleep so the display comes back and userspace (panic chord watcher) runs.
+	# every cycle: any held VOL UP / VOL DOWN / POWER (panic chord!) or an unreadable key state ends the sleep
+	KH=$(keyheld); KRC=$?
+	[ "$KRC" = 1 ] || { log "KEY state rc=$KRC [$KH] -> ending sleep"; break; }
 	sleep 0.3    # grace so a key event that woke us reaches fake_sessionmanager before we re-suspend
 	PW1=$(pwcount)
 	[ "$PW1" = "$PW0" ] || { log "POWER KEY event seen ($PW0 -> $PW1) reason=[$(cat /sys/kernel/wakeup_reasons/last_resume_reason)] -> ending sleep"; break; }
