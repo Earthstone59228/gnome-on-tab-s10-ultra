@@ -44,6 +44,9 @@ sleep 1
 
 T0=$(date +%s)
 cycle=0
+PWF=/data/fedora/fake-sessionmanager.log
+pwcount() { grep -a -c "power button" $PWF; }
+PW0=$(pwcount)
 while :; do
 	cycle=$((cycle + 1))
 	echo 0 > $RTC/wakealarm
@@ -68,6 +71,16 @@ while :; do
 	echo 0 > $RTC/wakealarm
 	log "resumed rc=$rc rtc=$(cat $RTC/since_epoch) success=$(cat $S/success) fail=$(cat $S/fail) dpms=$(cat $DPMS) reason=[$(cat /sys/kernel/wakeup_reasons/last_resume_reason | tr '\n' ';')] slept=$(cat /sys/kernel/wakeup_reasons/last_suspend_time)"
 	[ "$rc" = 0 ] || break
+	# FAIL-SAFE: keep sleeping only through known-benign wakes. Any other reason (buttons incl. VOL UP = panic chord,
+	# power key, touch, cover, unknown) ends the sleep so the display comes back and userspace (panic chord watcher) runs.
+	sleep 0.3    # grace so a key event that woke us reaches fake_sessionmanager before we re-suspend
+	PW1=$(pwcount)
+	[ "$PW1" = "$PW0" ] || { log "POWER KEY event seen ($PW0 -> $PW1) reason=[$(cat /sys/kernel/wakeup_reasons/last_resume_reason)] -> ending sleep"; break; }
+	R1=$(cat /sys/kernel/wakeup_reasons/last_resume_reason)
+	case "$R1" in
+		*CCIF_AP_DATA0*|*A96T3X6*|*vcp_mboxdev*|*MBOX_SCP_ISR*|*adsp_mailbox*|*mailbox*|*alarmtimer*|*mt6685-rtc*|"") ;;
+		*) log "non-benign wake [$R1] -> ending sleep"; break;;
+	esac
 	[ "$TOTAL" -gt 0 ] && [ $(( $(date +%s) - T0 )) -lt "$TOTAL" ] || break
 done
 for t in 1 2 3; do
