@@ -1,0 +1,45 @@
+--- a/src/android/fedora-session-gnome-shell.sh (deployed base)
++++ b/src/android/fedora-session-gnome-shell.sh (with sleep daemon)
+@@ -776,7 +776,16 @@
+ 				if [ -n "$ADDR" ] && timeout 8 nsenter -t "$GS" -m -- chroot "$R" /usr/bin/env DBUS_SESSION_BUS_ADDRESS="$ADDR" \
+ 						/usr/bin/gdbus call --session --timeout 5 --dest org.gnome.Shell --object-path /org/gnome/Shell \
+ 						--method org.freedesktop.DBus.Properties.Get org.gnome.Shell ShellVersion >/dev/null 2>&1; then
+-					[ "$alive_seen" = 0 ] && log "monitor: gnome-shell main loop answering (liveness armed)"
++					if [ "$alive_seen" = 0 ]; then
++						log "monitor: gnome-shell main loop answering (liveness armed)"
++						# 2026-10-07 sleep daemon (doc 11 §AR): power button = deep sleep. Opt-out: $T/no-sleepd.
++						# setsid: not in the runner's process group; it exits by itself when gnome-shell goes away.
++						if [ -f "$T/fedora-sleepd.sh" ] && [ -f "$T/fedora-suspend-dpms.sh" ] && [ -f "$R/usr/local/bin/keystate.py" ] && [ ! -e "$T/no-sleepd" ]; then
++							rm -f "$T/sleepd.stop"
++							setsid sh "$T/fedora-sleepd.sh" >> "$T/sleepd.out" 2>&1 &
++							log "monitor: sleep daemon started (opt-out: touch $T/no-sleepd)"
++						fi
++					fi
+ 					alive_seen=1; miss=0
+ 				elif [ "$alive_seen" = 1 ]; then
+ 					miss=$((miss + 1))
+@@ -857,6 +866,16 @@
+ [ -n "$UWPID" ] && kill -9 "$UWPID" 2>/dev/null
+ [ -n "$AWPID" ] && kill -9 "$AWPID" 2>/dev/null   # 2026-09-28 audio watchdog (§AE)
+ [ -n "$IJPID" ] && kill -9 "$IJPID" 2>/dev/null   # 2026-09-27 input janitor (fd close auto-releases its grabs)
++# 2026-10-07 sleep daemon + suspend engine: stop them BEFORE the Android restore so nothing suspends or touches the
++# panel while HWC/SF come back (SIGKILL: they inherit an ignored SIGTERM); clear the RTC alarm the engine may have armed.
++log "supervisor: pre-restore panel state: dpms=$(cat /sys/class/drm/card0-DSI-1/dpms 2>/dev/null) $(timeout 3 grep -o 'CRTC0 wk active:[01]' /proc/mtkfb 2>/dev/null)"
++touch "$T/sleepd.stop"
++for sp in $(pgrep -f 'fedora-sleepd.sh|fedora-suspend-dpms.sh' 2>/dev/null); do kill -9 "$sp" 2>/dev/null; done
++# reap first: only clear the RTC alarm once the engine is really gone (a SIGKILL does not abort a suspend already entering)
++sw=0; while [ -n "$(pgrep -f 'fedora-sleepd.sh|fedora-suspend-dpms.sh' 2>/dev/null)" ] && [ "$sw" -lt 5 ]; do sleep 1; sw=$((sw + 1)); done
++pkill -9 -f 'gdbus monitor --session --dest org.gnome.Shell' 2>/dev/null
++echo 0 > /sys/class/rtc/rtc0/wakealarm 2>/dev/null
++rm -rf "$T/sleepd.lock"
+ # $R/run is a shared mount: the watcher's drive binds propagate back here and would keep the USB drive busy
+ grep " $R/run/media/root/" /proc/mounts | awk '{print $2}' | while read -r m; do sync; umount -l "$m" 2>/dev/null && log "supervisor: drive bind $m released"; done
+ # audit F02: the sfsentinel placeholder is NOT killed here. It must stay up while HWC/SF are restarted; the shared
+@@ -878,6 +897,7 @@
+ 	sleep 10
+ done
+ log "supervisor: compositor exited rc=$RC — restore returned rc=$rrc after $ra attempt(s)"
++log "supervisor: post-restore panel state: dpms=$(cat /sys/class/drm/card0-DSI-1/dpms 2>/dev/null) $(timeout 3 grep -o 'CRTC0 wk active:[01]' /proc/mtkfb 2>/dev/null)"
+ # Belt-and-suspenders: the restore's start surfaceflinger re-registers the real
+ # names (overwriting any lingering placeholder). If the stub somehow survived,
+ # remove it ONLY after SF is confirmed back so the real registration wins.

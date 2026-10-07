@@ -59,7 +59,13 @@ trap cleanup EXIT
 trap '' HUP
 trap 'exit 0' INT TERM
 
-B=$(getblank)
+# the screen-blank extension may not be exported yet when the supervisor starts us: retry for ~30 s
+B=""
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+	B=$(getblank)
+	case "$B" in *true*|*false*) break;; esac
+	sleep 2
+done
 case "$B" in *true*) setstate 1;; *false*) setstate 0;; *) log "cannot read Blanked ($B), exit"; exit 1;; esac
 ( inch gdbus monitor --session --dest org.gnome.Shell --object-path /org/fedoratab/ScreenBlank 2>/dev/null | while read -r line; do
 	case "$line" in
