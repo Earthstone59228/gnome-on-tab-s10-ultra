@@ -1,0 +1,37 @@
+--- screencastService.original.js	2026-10-07 22:34:43.409885276 +0700
++++ resource-src-v3/screencastService.js	2026-10-07 23:02:37.589218394 +0700
+@@ -30,6 +30,19 @@
+ const PIPELINE_BLOCKLIST_FILENAME = 'gnome-shell-screencast-pipeline-blocklist';
+ 
+ const PIPELINES = [
++    // SM-X926B: reuse GPU capture DMA buffers; avoid per-frame MemFd readback textures.
++    // Only this hardware path is added; failed negotiation retains upstream fallbacks.
++    {
++        id: 'hwenc-dmabuf-h264-mtk-v4l2-v3',
++        pipewireOptions: 'min-buffers=4 max-buffers=8',
++        fileExtension: 'mp4',
++        pipelineString:
++            'capsfilter caps=video/x-raw(memory:DMABuf),format=DMA_DRM,max-framerate=%F/1 ! \
++             queue leaky=downstream max-size-buffers=2 max-size-bytes=0 max-size-time=0 ! \
++             v4l2h264enc output-io-mode=dmabuf-import capture-io-mode=mmap extra-controls=controls,video_bitrate=12000000,video_gop_size=30,h264_i_frame_period=30,sequence_header_mode=1,h264_level=15 ! \
++             queue ! h264parse ! \
++             mp4mux fragment-duration=500 fragment-mode=first-moov-then-finalise',
++    },
+     {
+         id: 'hwenc-dmabuf-h264-vaapi-lp',
+         fileExtension: 'mp4',
+@@ -505,12 +518,12 @@
+     }
+ 
+     _createPipeline(nodeId, pipelineConfig, framerate) {
+-        const {fileExtension, pipelineString} = pipelineConfig;
++        const {fileExtension, pipelineString, pipewireOptions = ''} = pipelineConfig;
+         const finalPipelineString = this._substituteVariables(pipelineString, framerate);
+         this._filePath = `${this._filePathStem}.${fileExtension}`;
+ 
+         const fullPipeline = `
+-            pipewiresrc path=${nodeId}
++            pipewiresrc path=${nodeId} ${pipewireOptions}
+                         do-timestamp=true
+                         keepalive-time=1000
+                         resend-last=true !

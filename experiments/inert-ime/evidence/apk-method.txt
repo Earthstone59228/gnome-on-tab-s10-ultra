@@ -1,0 +1,6 @@
+N: android=http://schemas.android.com/apk/res/android (line=1)
+  E: input-method (line=1)
+    A: http://schemas.android.com/apk/res/android:supportsSwitchingToNextInputMethod(0x010103eb)=false
+    A: http://schemas.android.com/apk/res/android:showInInputMethodPicker(0x01010648)=false
+    A: http://schemas.android.com/apk/res/android:supportsStylusHandwriting(0x01010653)=false
+    A: http://schemas.android.com/apk/res/android:supportsConnectionlessStylusHandwriting(0x0101069f)=false

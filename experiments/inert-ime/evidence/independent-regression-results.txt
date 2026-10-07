@@ -1,0 +1,9 @@
+foreground_user: PASS
+dump_user: PASS
+disconnected: PASS
+null_method: PASS
+visible: PASS
+installed_only: PASS
+late_observer: PASS
+output_error: PASS
+settings_error: PASS

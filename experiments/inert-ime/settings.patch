@@ -1,0 +1,23 @@
+--- baseline/fedora-android-settings.sh	2026-10-07 22:45:12.139914438 +0700
++++ stage/fedora-android-settings.sh	2026-10-07 22:52:39.076343766 +0700
+@@ -73,7 +73,10 @@
+ 	log "session values set and verified: brightness_mode=$(s get system screen_brightness_mode) screen_off_timeout=$(s get system screen_off_timeout) accelerometer_rotation=$(s get system accelerometer_rotation) hide_error_dialogs=$(s get global hide_error_dialogs)"
+ 	;;
+ restore)
+-	[ -f "$F" ] || exit 0
++	# IME snapshots have their own lifetime; apply even if settings snapshot is absent.
++	ime_rc=0
++	sh "$T/fedora-session-ime.sh" restore "$2" || ime_rc=1
++	[ -f "$F" ] || exit "$ime_rc"
+ 	ok=1
+ 	while read -r ns key val; do
+ 		[ -n "$key" ] || continue
+@@ -81,7 +84,7 @@
+ 		now=$(s get "$ns" "$key")
+ 		if [ "$now" != "$val" ]; then ok=0; log "restore $ns $key: wanted '$val', reads '$now' (will retry)"; fi
+ 	done < "$F"
+-	if [ "$ok" = 1 ]; then
++	if [ "$ok" = 1 ] && [ "$ime_rc" = 0 ]; then
+ 		# audit 2026-10-06: the supervisor restarts zygote right after fedora-restore.sh's restore, and the
+ 		# restored values did not survive that (every session since 09-27 re-snapshotted the SESSION values as
+ 		# "originals"). So a plain restore applies + verifies but KEEPS the snapshot; only `restore final`

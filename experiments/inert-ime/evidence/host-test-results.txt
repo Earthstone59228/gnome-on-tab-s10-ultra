@@ -1,0 +1,9 @@
+success: PASS
+absent_history: PASS
+wrong_binding: PASS
+down: PASS
+handwriting: PASS
+setfail: PASS
+abort failures=0: PASS
+abort failures=1: PASS
+abort failures=99: PASS

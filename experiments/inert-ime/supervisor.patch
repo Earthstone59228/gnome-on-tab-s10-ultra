@@ -1,0 +1,135 @@
+--- baseline/fedora-session-gnome-shell.sh	2026-10-07 22:45:12.033917331 +0700
++++ stage/fedora-session-gnome-shell.sh	2026-10-07 23:08:14.440714138 +0700
+@@ -95,6 +95,9 @@
+ 	exec sh "$0" "$MINS" nocool
+ fi
+ 
++# Both launcher and direct supervisor invocation require hash-pinned runtime admission.
++sh "$T/fedora-session-ime.sh" launch-check || { log "IME runtime admission missing or stale; session refused"; exit 1; }
++
+ # ---------------- launcher path (default) ----------------
+ # Argument is MINUTES, not seconds (same units/reasoning as fedora-session-gpu-test.sh).
+ if [ "$1" != "sup" ]; then
+@@ -139,6 +142,9 @@
+ 	if [ ! -f "$T/fedora-android-settings.sh" ]; then
+ 		log "prereq: fedora-android-settings.sh missing — aborting (SF untouched)"; echo "prereq fail: fedora-android-settings.sh"; exit 1
+ 	fi
++	if [ ! -x "$T/fedora-session-ime.sh" ] || [ -e "$T/.fedora-session-ime" ] || [ -e "$T/.fedora-session-ime.tmp" ]; then
++		log "prereq: IME helper missing or earlier IME recovery pending — aborting before new supervisor"; exit 1
++	fi
+ 	# audit F04: everything the recovery path needs must exist BEFORE SurfaceFlinger is ever stopped
+ 	if [ ! -x "$R/usr/local/bin/mastercheck" ]; then
+ 		log "prereq: $R/usr/local/bin/mastercheck missing/not executable (restore cannot test DRM master) — aborting (SF untouched)"; echo "prereq fail: mastercheck"; exit 1
+@@ -242,6 +248,9 @@
+ 			echo "$(date) watchdog: restore invocation returned rc=$wrc" >> "$LOG"
+ 			stale=0
+ 			if [ "$wrc" = 0 ]; then
++				sh "'"$T"'"/fedora-android-settings.sh restore final || wrc=1
++			fi
++			if [ "$wrc" = 0 ]; then
+ 				rm -f "$PH"
+ 				echo "$(date) watchdog: restore succeeded — watchdog done" >> "$LOG"
+ 				exit 0
+@@ -266,9 +275,19 @@
+ 	[ -n "$PGPID" ] && { kill "$PGPID" 2>/dev/null; sleep 1; kill -9 "$PGPID" 2>/dev/null; PGPID=""; }
+ 	runcon u:r:shell:s0 /system/bin/cmd power set-wakelock release FULL_WAKE_LOCK >/dev/null 2>&1
+ 	runcon u:r:shell:s0 /system/bin/cmd power suppress-ambient-display fedora-session false >/dev/null 2>&1
+-	sh "$T/fedora-android-settings.sh" restore final
+-	kill -9 "$WPID" 2>/dev/null
+-	rm -f "$PH"
++	# A transient failure after selecting the inert IME must keep automatic recovery alive.
++	phase abort-before-sf 0
++	ar=0; recovered=0
++	while [ "$ar" -lt 3 ]; do
++		if sh "$T/fedora-android-settings.sh" restore final; then recovered=1; break; fi
++		ar=$((ar + 1)); sleep 2
++	done
++	if [ "$recovered" = 1 ]; then
++		kill -9 "$WPID" 2>/dev/null
++		rm -f "$PH"
++	else
++		log "supervisor: pre-SF settings/IME restore failed; originals and watchdog retained for recovery"
++	fi
+ 	exit 1
+ }
+ 
+@@ -291,7 +310,9 @@
+ # fedora-restore.sh). Android auto-brightness off for the session: GNOME owns the panel backlight now, and two
+ # controllers writing /sys/class/backlight/panel made GNOME's slider jump (P.1). Timeout max: stayon only
+ # covers "plugged in", so an unplugged session would otherwise hit Android's idle screen-off.
++[ -x "$T/fedora-session-ime.sh" ] || abort_before_sf "session IME helper missing"
+ sh "$T/fedora-android-settings.sh" save || abort_before_sf "could not save/apply the protective Android settings (rotation, idle, crash dialogs)"
++sh "$T/fedora-session-ime.sh" prepare || abort_before_sf "could not prepare inert Android IME"
+ # 2026-09-27 ROOT CAUSE of the ColorFade crash loops (sessions #2, #4): `svc power stayon true` never worked from
+ # this root context — svc runs app_process, which fails here with CANNOT LINK libnativeloader.so — so nothing
+ # held Android awake: after the wake key it fell back into Doze/AOD ~4 s later, i.e. right after SF was stopped.
+@@ -532,6 +553,7 @@
+ fi
+ [ "$tw" -gt 0 ] && log "supervisor: waited for Android toast(s) to clear before stopping SF ($tw checks + 1 s settle)"
+ phase sf-stopped 150
++sh "$T/fedora-session-ime.sh" verify || abort_before_sf "inert Android IME safety state changed"
+ runcon_shell stop surfaceflinger
+ log "supervisor: surfaceflinger stopped (panel vrr=[$(cat /sys/class/lcd/panel/vrr 2>/dev/null)])"
+ 
+@@ -605,7 +627,7 @@
+ done
+ if ! kill -0 "$SFSENTINEL_PID" 2>/dev/null || ! runcon u:r:shell:s0 /system/bin/service check SurfaceFlinger 2>/dev/null | grep -q ": found"; then
+ 	log "supervisor: ABORT — sfsentinel placeholder not running/registered after ${sw}s; handing Android back (HWC is still up, so SurfaceFlinger is simply started again — the shared restore cannot be used here: HWC holds DRM master)"
+-	kill -9 "$WPID" 2>/dev/null
++	phase restoring 900
+ 	[ -n "$AWPID" ] && kill -9 "$AWPID" 2>/dev/null
+ 	[ -n "$IHON" ] && { sh "$T/input-hide.sh" off; IHON=""; }
+ 	sfok=0
+@@ -618,9 +640,8 @@
+ 		sleep 2
+ 	done
+ 	if [ "$sfok" != 1 ]; then
+-		# keep the placeholder (fail-fast names) and the phase file out of the way; the watchdog is already gone, so say so loudly
++		# Keep the existing placeholder path and watchdog recovery armed until Android returns.
+ 		log "supervisor: sentinel-abort: SurfaceFlinger did NOT start after 3 attempts — running the shared restore (it stops HWC, retakes DRM master, restarts HWC + SF); placeholder kept until SF is up"
+-		rm -f "$PH"
+ 		sh "$T/fedora-restore.sh"
+ 		log "supervisor: sentinel-abort: shared restore rc=$? (sf=$(getprop init.svc.surfaceflinger)); hardware fallback POWER + VOL DOWN ~10 s"
+ 		exit 1
+@@ -657,7 +678,12 @@
+ 		rm -f "$T/.wifi-svc-disabled"
+ 	fi
+ 	[ -n "$PGPID" ] && { kill "$PGPID" 2>/dev/null; sleep 1; kill -9 "$PGPID" 2>/dev/null; }
+-	rm -f "$PH"
++	if [ ! -e "$T/.fedora-session-ime" ] && [ ! -e "$T/.fedora-android-settings" ]; then
++		kill -9 "$WPID" 2>/dev/null
++		rm -f "$PH"
++	else
++		log "supervisor: early post-SF recovery incomplete; snapshots and watchdog retained"
++	fi
+ 	log "supervisor: sentinel-abort recovery done (sf=$(getprop init.svc.surfaceflinger) zygote=$(getprop init.svc.zygote))"
+ 	exit 1
+ fi
+@@ -861,10 +887,10 @@
+ grep " $R/run/media/root/" /proc/mounts | awk '{print $2}' | while read -r m; do sync; umount -l "$m" 2>/dev/null && log "supervisor: drive bind $m released"; done
+ # audit F02: the sfsentinel placeholder is NOT killed here. It must stay up while HWC/SF are restarted; the shared
+ # restore dismisses it only after the real SurfaceFlinger is confirmed running (and keeps it if that fails).
+-log "supervisor: dismissing watchdog ($WPID)"
+-kill -9 "$WPID" 2>/dev/null
+-log "supervisor: watchdog dismissed"
+-rm -f "$PH"
++# Retain watchdog through IME/settings final verification, including zygote restart.
++# A live supervisor owns restore; a dead or hung one leaves recovery to the watchdog.
++phase restoring 900
++log "supervisor: watchdog retained until settings and IME recovery verified"
+ log "supervisor: invoking shared restore (F14)"
+ # 2026-09-26 audit #3: an aborted restore (master held / HWC down) used to be final. Retry it; each attempt
+ # escalates on its own (kills chroot card0 holders, restarts HWC).
+@@ -943,3 +969,12 @@
+ else
+ 	log "supervisor: SurfaceFlinger not running at the end — leaving the pogo ghost / input hide to remove themselves"
+ fi
++
++# Failed final verification must retain automatic recovery after this supervisor exits.
++if [ ! -e "$T/.fedora-session-ime" ] && [ ! -e "$T/.fedora-android-settings" ]; then
++    kill -9 "$WPID" 2>/dev/null
++    rm -f "$PH"
++    log "supervisor: recovery snapshots clear; watchdog dismissed"
++else
++    log "supervisor: recovery pending; snapshots and watchdog retained"
++fi

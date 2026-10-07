@@ -1,0 +1,9 @@
+admission identity success: PASS
+admission identity same_pid: PASS
+admission identity wrong_uid: PASS
+admission identity wrong_name: PASS
+admission identity wrong_remote: PASS
+admission identity framework_restart: PASS
+absent review gate install-dummy-ime-apk.sh: PASS
+absent review gate admit-dummy-ime.sh: PASS
+absent review gate install-dummy-ime.sh: PASS
