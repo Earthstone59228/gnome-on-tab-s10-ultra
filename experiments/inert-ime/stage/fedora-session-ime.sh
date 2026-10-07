@@ -5,6 +5,9 @@ D=$T/.fedora-session-ime
 LOCK=$T/.fedora-session-ime-lock
 IME=org.fedora.sessionime/.InertIme
 KEYS='default_input_method enabled_input_methods selected_input_method_subtype input_methods_subtype_history'
+# Android has no builtin printf, and dumpsys output exceeds the 128 KiB argv limit (E2BIG).
+# mksh `print` is a builtin; the printf branch only serves host test shells.
+p() { if [ -n "${KSH_VERSION:-}" ]; then print -r -- "$1"; else printf '%s\n' "$1"; fi; }
 log() { echo "$(date) session-ime: $*" >> "$T/fedora-session-gnome-shell.log"; }
 fail() { log "$*"; exit 1; }
 s() { timeout -k 2 15 runcon u:r:shell:s0 /system/bin/settings --user 0 "$@" </dev/null; }
@@ -16,28 +19,43 @@ display_ready() {
     timeout -k 2 5 runcon u:r:shell:s0 /system/bin/dumpsys SurfaceFlinger --list >/dev/null 2>&1
 }
 user_zero() { current_user=$(c activity get-current-user) || return 1; [ "$current_user" = 0 ]; }
-# Check the selected AND connected user-0 binding, never an installed-method list.
-verify_binding() {
+# Android binds the selected IME lazily (only when an editor gains focus or the IME is shown),
+# so "selected and nothing bound" is the normal idle state. bind_state accepts exactly two states
+# for the WANTED ime and sets bstate: `bound` (current id == wanted, main connection, invoker)
+# or `unbound` (current id/method null, no main connection). Anything else, including a different
+# IME bound while wanted is selected, or a missing field, fails closed. Never an installed list.
+bind_state() {
     wanted=$1
     dump=$(timeout -k 2 8 runcon u:r:shell:s0 /system/bin/dumpsys input_method 2>/dev/null) || return 1
-    bound=$(printf '%s\n' "$dump" | awk '/^  UserId=0$/ {inuser=1; next} inuser && /^    Input Methods:/ {exit} inuser {print}')
+    bound=$(p "$dump" | awk '/^  UserId=0$/ {inuser=1; next} inuser && /^    Input Methods:/ {exit} inuser {print}')
     # Literal field comparisons avoid component dots becoming regex wildcards.
-    printf '%s\n' "$bound" | awk -v id="$wanted" '
+    st=$(p "$bound" | awk -v id="$wanted" '
         { sub(/^[ \t]+/, "") }
         $0 == "mSelectedMethodId=" id {selected=1}
-        $0 == "mCurId=" id {current=1}
+        /^mCurId=/ {curid=$0}
         $0 == "mHasMainConnection=true" {connected=1}
-        /^mCurMethod=com.android.server.inputmethod.IInputMethodInvoker@/ {method=1}
-        END {exit !(selected && current && connected && method)}' || return 1
+        $0 == "mHasMainConnection=false" {unconnected=1}
+        /^mCurMethod=/ {method=$0}
+        END {
+            if (!selected) print "bad"
+            else if (curid == "mCurId=" id && connected && method ~ /^mCurMethod=com.android.server.inputmethod.IInputMethodInvoker@/) print "bound"
+            else if (curid == "mCurId=null" && unconnected && method == "mCurMethod=null") print "unbound"
+            else print "bad"
+        }') || return 1
+    case "$st" in bound|unbound) bstate=$st;; *) return 1;; esac
 }
+verify_binding() { bind_state "$1"; }
 verify() {
     user_zero || return 1
     selected=$(s get secure default_input_method) || return 1
     [ "$selected" = "$IME" ] || return 1
-    verify_binding "$IME" || return 1
-    printf '%s\n' "$bound" | grep -q 'mSupportsStylusHw=false$' || return 1
-    printf '%s\n' "$bound" | grep -q 'mSupportsConnectionlessStylusHw=false$' || return 1
-    printf '%s\n' "$bound" | grep -q 'mImeWindowVis=0$' || return 1
+    bind_state "$IME" || return 1
+    p "$bound" | grep -q 'mImeWindowVis=0$' || return 1
+    # Handwriting flags are only meaningful once the dummy has actually bound.
+    if [ "$bstate" = bound ]; then
+        p "$bound" | grep -q 'mSupportsStylusHw=false$' || return 1
+        p "$bound" | grep -q 'mSupportsConnectionlessStylusHw=false$' || return 1
+    fi
 }
 umask 077
 # Android mksh marks `exec 9>file` close-on-exec, so toybox `flock -n 9` (fd-only) sees EBADF.
@@ -54,15 +72,15 @@ prepare)
     user_zero || fail 'only foreground Android user 0 supported'
     [ ! -e "$D" ] || fail 'old snapshot exists; restore it before starting a new session'
     list=$(s list secure) || fail 'cannot snapshot secure settings'
-    printf '%s\n' "$list" | grep -q '^default_input_method=.' || fail 'original IME is unset; refusing unsafe fallback'
-    original=$(printf '%s\n' "$list" | sed -n 's/^default_input_method=//p')
+    p "$list" | grep -q '^default_input_method=.' || fail 'original IME is unset; refusing unsafe fallback'
+    original=$(p "$list" | sed -n 's/^default_input_method=//p')
     [ "$original" != "$IME" ] || fail 'inert IME already default without a snapshot; recover manually'
     case "$original" in *[!a-zA-Z0-9_./]*|''|*/*/*) fail 'unrecognized original IME component';; esac
     [ ! -e "$D.tmp" ] || fail 'incomplete old snapshot present; recover before retry'
     mkdir "$D.tmp" || fail 'cannot create snapshot'
     for key in $KEYS; do
-        if printf '%s\n' "$list" | grep -q "^$key="; then
-            printf '%s\n' "$list" | sed -n "s/^$key=//p" > "$D.tmp/$key.value" || fail 'snapshot write failed'
+        if p "$list" | grep -q "^$key="; then
+            p "$list" | sed -n "s/^$key=//p" > "$D.tmp/$key.value" || fail 'snapshot write failed'
             echo 1 > "$D.tmp/$key.present" || fail 'snapshot write failed'
         else
             : > "$D.tmp/$key.value"
@@ -87,18 +105,18 @@ restored-binding-check)
     user_zero || fail 'original foreground user unavailable'
     selected=$(s get secure default_input_method) || fail 'original default unreadable'
     [ "$selected" != "$IME" ] && [ -n "$selected" ] && [ "$selected" != null ] || fail 'original default not restored'
-    verify_binding "$selected" || fail 'original default not connected'
+    verify_binding "$selected" || fail 'original default not selected or another IME bound'
     ;;
 service-identity)
-    verify || fail 'dummy binding unavailable for process identity proof'
-    identity=$(printf '%s\n' "$dump" | sed -n 's/^[ \t]*FedoraSessionInertIme pid=\([0-9][0-9]*\) uid=\([0-9][0-9]*\)$/\1 \2/p')
+    verify && [ "$bstate" = bound ] || fail 'dummy binding unavailable for process identity proof'
+    identity=$(p "$dump" | sed -n 's/^[ \t]*FedoraSessionInertIme pid=\([0-9][0-9]*\) uid=\([0-9][0-9]*\)$/\1 \2/p')
     [ -n "$identity" ] || fail 'bound dummy service process proof missing'
-    printf '%s\n' "$identity"
+    p "$identity"
     ;;
 binding-evidence)
-    verify || fail 'cannot read connected dummy binding evidence'
-    token=$(printf '%s\n' "$bound" | sed -n 's/^[ \t]*mCurToken=\(android.os.Binder@[0-9a-f]*\)$/\1/p')
-    display=$(printf '%s\n' "$bound" | sed -n 's/^[ \t]*mCurTokenDisplayId=\([0-9][0-9]*\)$/\1/p')
+    verify && [ "$bstate" = bound ] || fail 'cannot read connected dummy binding evidence'
+    token=$(p "$bound" | sed -n 's/^[ \t]*mCurToken=\(android.os.Binder@[0-9a-f]*\)$/\1/p')
+    display=$(p "$bound" | sed -n 's/^[ \t]*mCurTokenDisplayId=\([0-9][0-9]*\)$/\1/p')
     [ -n "$token" ] && [ "$display" = 0 ] || fail 'binding token/display evidence invalid'
     printf '%s %s\n' "$token" "$display"
     ;;
@@ -129,11 +147,11 @@ restore)
     list=$(s list secure) || fail 'restore verification unreadable'
     for key in $KEYS; do
         if [ "$(cat "$D/$key.present")" = 1 ]; then
-            printf '%s\n' "$list" | grep -q "^$key=" || fail 'restore lost a present setting'
-            now=$(printf '%s\n' "$list" | sed -n "s/^$key=//p")
+            p "$list" | grep -q "^$key=" || fail 'restore lost a present setting'
+            now=$(p "$list" | sed -n "s/^$key=//p")
             [ "$now" = "$(cat "$D/$key.value")" ] || fail 'restore value mismatch; snapshot retained'
         else
-            printf '%s\n' "$list" | grep -q "^$key=" && fail 'restore recreated an absent setting'
+            p "$list" | grep -q "^$key=" && fail 'restore recreated an absent setting'
         fi
     done
     # Settings bytes alone cannot prove the original IME successfully rebound.
@@ -143,16 +161,16 @@ restore)
         [ "$good" -ge 2 ] && break
         sleep 1; n=$((n + 1))
     done
-    [ "$good" -ge 2 ] || fail 'original IME has not rebound; snapshot retained for recovery'
+    [ "$good" -ge 2 ] || fail 'original IME not selected/clean; snapshot retained for recovery'
     # Re-read after binding settles: subtype observers may have changed values meanwhile.
     list=$(s list secure) || fail 'restore verification unreadable'
     for key in $KEYS; do
         if [ "$(cat "$D/$key.present")" = 1 ]; then
-            printf '%s\n' "$list" | grep -q "^$key=" || fail 'restore lost a present setting'
-            now=$(printf '%s\n' "$list" | sed -n "s/^$key=//p")
+            p "$list" | grep -q "^$key=" || fail 'restore lost a present setting'
+            now=$(p "$list" | sed -n "s/^$key=//p")
             [ "$now" = "$(cat "$D/$key.value")" ] || fail 'restore value mismatch; snapshot retained'
         else
-            printf '%s\n' "$list" | grep -q "^$key=" && fail 'restore recreated an absent setting'
+            p "$list" | grep -q "^$key=" && fail 'restore recreated an absent setting'
         fi
     done
     if [ "$2" = final ]; then rm -rf "$D"; log 'IME restored and verified; snapshot removed';

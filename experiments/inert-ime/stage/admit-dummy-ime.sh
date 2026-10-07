@@ -53,7 +53,14 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' INT TERM HUP
 sh "$HELPER" prepare
-sh "$HELPER" binding-evidence > "$RECORD/pre-rebind.binding"
+# Android binds lazily: the operator must focus any text field (e.g. a search bar) so the dummy
+# binds. SF/HWC stay up the whole time; no UI is launched by this script. Not bound in time = fail.
+echo 'ACTION: tap any text field on the tablet now so the test keyboard binds (waiting up to 120 s)'
+n=0
+until sh "$HELPER" binding-evidence > "$RECORD/pre-rebind.binding" 2>/dev/null; do
+    n=$((n + 1)); [ "$n" -lt 120 ] || exit 1
+    sleep 1
+done
 # Record and validate exact package UID and one process cmdline immediately before kill.
 packages=$(timeout -k 2 15 runcon u:r:shell:s0 /system/bin/cmd package list packages -U org.fedora.sessionime)
 uid=$(printf '%s\n' "$packages" | sed -n 's/^package:org\.fedora\.sessionime uid:\([0-9][0-9]*\)$/\1/p')
