@@ -88,6 +88,9 @@ while :; do
 	[ "$PW1" = "$PW0" ] || { log "POWER KEY event seen ($PW0 -> $PW1) reason=[$(cat /sys/kernel/wakeup_reasons/last_resume_reason)] -> ending sleep"; break; }
 	R1=$(cat /sys/kernel/wakeup_reasons/last_resume_reason)
 	case "$R1" in
+		# user-wake reasons FIRST (a combined reason like "A96T3X6;rcs_irq" must not be swallowed by a benign pattern):
+		# rcs_irq = PMIC interrupt line (power key / PMIC events), Volume_Up = gpio-keys VOL UP
+		*rcs_irq*|*Volume*|*pmic*|*pwrkey*) log "user wake reason [$R1] -> ending sleep"; break;;
 		*CCIF_AP_DATA0*|*A96T3X6*|*vcp_mboxdev*|*MBOX_SCP_ISR*|*adsp_mailbox*|*mailbox*|*alarmtimer*|*mt6685-rtc*|"") ;;
 		*) log "non-benign wake [$R1] -> ending sleep"; break;;
 	esac
