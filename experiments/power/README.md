@@ -1,5 +1,10 @@
 # Deep-sleep experiment (failed, 2026-10-07)
 
+> **STATUS: SHELVED — do not deploy.** This experiment wedged the tablet twice (hard restart + re-root each time). Root cause: a leaked `uart_mutex` in MediaTek's `8250_mtk` serial driver (`mtk8250_set_flush_flag` returns without unlocking when the UART DMA channels are NULL) self-deadlocks with the Bluetooth UART driver's non-freezable TX thread during suspend; the BT suspend notifier, its workers and the HAL then queue behind it, and the display driver's PM notifier blocks every atomic commit, so the screen cannot come back. It is a vendor bug in a locked stock kernel; the engine's ~40 suspends/min hit the ~1-in-3,600 race. The scripts are kept here for reference only; the display-off-first suspend sequence itself (the display-driver fix) worked.
+>
+> Ideas if someone revives it: sleep only when the BT driver is truly closed (no `btmtk_uart_tx_thread`), refuse to suspend when the driver is already stuck, capture kmsg continuously, cut the suspend rate (airplane mode), and add a sysrq-reboot watchdog.
+
+
 `fedora-suspend-test.sh <A|B|C> [secs]` arms the RTC wake alarm, optionally powers the panel down (mode C), then writes `mem` to `/sys/power/state`. Run it from a root shell during a session, detached (adb may drop).
 
 Result: mode A (panel powered, 10 s RTC wake, SurfaceFlinger stopped, GNOME running) did **not** hit a kernel fault. `last_kmsg` shows suspend entering `s2idle`, a warning in `drm_kms_helper_poll_disable` called from `mtk_drm_sys_suspend`, and then the suspending task blocked forever in `mtk_atomic_commit` (the MediaTek DRM driver's own "disable everything" commit), with display power-controller counters unbalanced (`dpc_pm unbalanced`, `Runtime PM usage count underflow`, `idlemgr_async_put: invalid put w/o get`). Suspend never completed, so the RTC alarm could not resume it, and ~100 s later the software watchdog (`softdog.soft_margin=100`, fed from frozen userspace) panicked the kernel. The watchdog worked as designed; the bug is that the display pipeline state is owned by a userspace compositor with SurfaceFlinger/HWC stopped.

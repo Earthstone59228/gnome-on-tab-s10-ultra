@@ -1,5 +1,10 @@
 # Deep sleep for the GNOME session (2026-10-07)
 
+> **STATUS: SHELVED — do not deploy.** This experiment wedged the tablet twice (hard restart + re-root each time). Root cause: a leaked `uart_mutex` in MediaTek's `8250_mtk` serial driver (`mtk8250_set_flush_flag` returns without unlocking when the UART DMA channels are NULL) self-deadlocks with the Bluetooth UART driver's non-freezable TX thread during suspend; the BT suspend notifier, its workers and the HAL then queue behind it, and the display driver's PM notifier blocks every atomic commit, so the screen cannot come back. It is a vendor bug in a locked stock kernel; the engine's ~40 suspends/min hit the ~1-in-3,600 race. The scripts are kept here for reference only; the display-off-first suspend sequence itself (the display-driver fix) worked.
+>
+> Ideas if someone revives it: sleep only when the BT driver is truly closed (no `btmtk_uart_tx_thread`), refuse to suspend when the driver is already stuck, capture kmsg continuously, cut the suspend rate (airplane mode), and add a sysrq-reboot watchdog.
+
+
 **Status: power button = real deep sleep WORKS (confirmed live on the device), auto-start deployed, several items still open (end of page).**
 Everything was audited by fresh agents (4 passes, every one found real bugs). Scripts live in `experiments/power/`.
 
