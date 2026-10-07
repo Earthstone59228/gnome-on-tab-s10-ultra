@@ -36,7 +36,9 @@ psm() { inch timeout 10 gdbus call --session --dest org.gnome.Mutter.DisplayConf
 	--method org.freedesktop.DBus.Properties.Set org.gnome.Mutter.DisplayConfig PowerSaveMode "<int32 $1>" >> "$L" 2>&1; }
 unblank() { inch timeout 10 gdbus call --session --dest org.gnome.Shell --object-path /org/fedoratab/ScreenBlank \
 	--method org.fedoratab.ScreenBlank.Unblank >> "$L" 2>&1; }
-cleanup() { echo 0 > $RTC/wakealarm; [ "$(cat $DPMS)" = On ] || { resolve && psm 0; }; }
+BTQ=/data/local/tmp/fedora-bt-quiet.sh
+btq_restore_bg() { [ -f /data/local/tmp/sleepd.bt-state ] || [ -f /data/local/tmp/sleepd.bt-state.restoring ] && { sh "$BTQ" restore >/dev/null 2>&1 & }; }
+cleanup() { echo 0 > $RTC/wakealarm; [ "$(cat $DPMS)" = On ] || { resolve && psm 0; }; btq_restore_bg; }
 
 log "start gs=$GS secs=$SECS dpms=$(cat $DPMS) wk=$(timeout 3 grep -o 'CRTC0 wk active:[01]' /proc/mtkfb) success=$(cat $S/success) fail=$(cat $S/fail)"
 [ -n "$(cat $RTC/since_epoch)" ] || { log "no rtc since_epoch, abort"; exit 1; }
@@ -47,6 +49,14 @@ trap 'exit 1' INT TERM
 # precheck: key state must be readable (rc 1 = readable, nothing held) or we refuse to blank/sleep at all
 KH=$(keyheld); KRC=$?
 [ "$KRC" = 1 ] || { log "keystate precheck rc=$KRC [$KH], abort (no sleep)"; exit 1; }
+
+# 2026-10-07 (incident 12:25): keep the BT chip/driver idle while we sleep (its PM notifier deadlocked once in ~3,600 suspends).
+# Mandatory: if Bluetooth cannot be quieted we do NOT sleep. BT_QUIET=0 disables this (manual tests only).
+if [ "${BT_QUIET:-1}" != 0 ]; then
+	[ -f "$BTQ" ] || { log "$BTQ missing, abort (no sleep)"; exit 1; }
+	sh "$BTQ" off; BRC=$?
+	[ "$BRC" = 0 ] || { log "bluetooth could not be quieted (rc=$BRC), abort (no sleep)"; exit 1; }
+fi
 
 PWF=/data/fedora/fake-sessionmanager.log
 pwcount() { grep -a -c "power button" $PWF; }
@@ -132,4 +142,5 @@ if [ "$UNBLANK_ON_WAKE" = 1 ]; then
 	# unblank only if still blanked (a power Toggle may already have done it)
 	[ -z "$SLEEP_STATE_FILE" ] || [ "$(cat "$SLEEP_STATE_FILE" 2>/dev/null)" != 0 ] && unblank
 fi
+btq_restore_bg
 log "end dpms=$(cat $DPMS) wk=$(timeout 3 grep -o 'CRTC0 wk active:[01]' /proc/mtkfb)"

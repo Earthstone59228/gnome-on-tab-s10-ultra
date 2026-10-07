@@ -51,6 +51,7 @@ psm0() { inch timeout 10 gdbus call --session --dest org.gnome.Mutter.DisplayCon
 	--method org.freedesktop.DBus.Properties.Set org.gnome.Mutter.DisplayConfig PowerSaveMode "<int32 0>" >> "$L" 2>&1; }
 
 cleanup() {
+	{ [ -f "$T/sleepd.bt-state" ] || [ -f "$T/sleepd.bt-state.restoring" ]; } && sh "$T/fedora-bt-quiet.sh" restore >/dev/null 2>&1
 	for p in $(pgrep -f 'gdbus monitor --session --dest org.gnome.Shell'); do kill -9 "$p" 2>/dev/null; done
 	kill -9 "$MON" 2>/dev/null
 	rm -rf "$LOCK" 2>/dev/null
@@ -59,6 +60,8 @@ trap cleanup EXIT
 trap '' HUP
 trap 'exit 0' INT TERM
 
+# crash recovery: a previous engine/daemon may have died with Bluetooth quieted — put the snapshot back first
+[ -f "$T/sleepd.bt-state" ] || [ -f "$T/sleepd.bt-state.restoring" ] && { log "restoring Bluetooth snapshot left by an earlier run"; sh "$T/fedora-bt-quiet.sh" restore; }
 # the screen-blank extension may not be exported yet when the supervisor starts us: retry for ~30 s
 B=""
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do

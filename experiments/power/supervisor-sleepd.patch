@@ -1,6 +1,19 @@
 --- a/src/android/fedora-session-gnome-shell.sh (deployed base)
-+++ b/src/android/fedora-session-gnome-shell.sh (with sleep daemon)
-@@ -776,7 +776,16 @@
++++ b/src/android/fedora-session-gnome-shell.sh (with sleep daemon + BT restore)
+@@ -181,6 +181,12 @@
+ mono() { read -r _up _ </proc/uptime; echo "${_up%%.*}"; }   # monotonic seconds: immune to wall-clock steps
+ # seconds 0 = no deadline (the run phase); anything else is a deadline that many seconds from now
+ phase() { _dl=0; [ "$2" -gt 0 ] && _dl=$(( $(mono) + $2 )); echo "$1 $_dl $SPID" > "$PH.tmp" && mv -f "$PH.tmp" "$PH"; }
++# 2026-10-07: a previous run (crash, forced reboot) may have left Bluetooth quieted (snapshot in sleepd.bt-state): put it back
++# now, while SurfaceFlinger is still running, regardless of the no-sleepd flag.
++if [ -f "$T/sleepd.bt-state" ] || [ -f "$T/sleepd.bt-state.restoring" ]; then
++	log "supervisor: restoring a Bluetooth snapshot left by an earlier run ($(cat "$T/sleepd.bt-state" 2>/dev/null))"
++	[ -f "$T/fedora-bt-quiet.sh" ] && timeout 90 sh "$T/fedora-bt-quiet.sh" restore
++fi
+ phase bringup 480
+ # 2026-09-26 audit #3 (daily use): the supervisor and its watchdog are the only things that bring
+ # Android's display back, so the OOM killer must never pick them. oom_score_adj is INHERITED across
+@@ -776,7 +782,16 @@
  				if [ -n "$ADDR" ] && timeout 8 nsenter -t "$GS" -m -- chroot "$R" /usr/bin/env DBUS_SESSION_BUS_ADDRESS="$ADDR" \
  						/usr/bin/gdbus call --session --timeout 5 --dest org.gnome.Shell --object-path /org/gnome/Shell \
  						--method org.freedesktop.DBus.Properties.Get org.gnome.Shell ShellVersion >/dev/null 2>&1; then
@@ -18,7 +31,7 @@
  					alive_seen=1; miss=0
  				elif [ "$alive_seen" = 1 ]; then
  					miss=$((miss + 1))
-@@ -857,6 +866,16 @@
+@@ -857,6 +872,16 @@
  [ -n "$UWPID" ] && kill -9 "$UWPID" 2>/dev/null
  [ -n "$AWPID" ] && kill -9 "$AWPID" 2>/dev/null   # 2026-09-28 audio watchdog (§AE)
  [ -n "$IJPID" ] && kill -9 "$IJPID" 2>/dev/null   # 2026-09-27 input janitor (fd close auto-releases its grabs)
@@ -35,7 +48,7 @@
  # $R/run is a shared mount: the watcher's drive binds propagate back here and would keep the USB drive busy
  grep " $R/run/media/root/" /proc/mounts | awk '{print $2}' | while read -r m; do sync; umount -l "$m" 2>/dev/null && log "supervisor: drive bind $m released"; done
  # audit F02: the sfsentinel placeholder is NOT killed here. It must stay up while HWC/SF are restarted; the shared
-@@ -878,6 +897,7 @@
+@@ -878,6 +903,7 @@
  	sleep 10
  done
  log "supervisor: compositor exited rc=$RC — restore returned rc=$rrc after $ra attempt(s)"
@@ -43,3 +56,12 @@
  # Belt-and-suspenders: the restore's start surfaceflinger re-registers the real
  # names (overwriting any lingering placeholder). If the stub somehow survived,
  # remove it ONLY after SF is confirmed back so the real registration wins.
+@@ -943,3 +969,8 @@
+ else
+ 	log "supervisor: SurfaceFlinger not running at the end — leaving the pogo ghost / input hide to remove themselves"
+ fi
++# 2026-10-07: Android is back (SF running): give Bluetooth back if the sleep engine still holds a snapshot (it normally restores itself)
++if [ "$(getprop init.svc.surfaceflinger)" = "running" ] && { [ -f "$T/sleepd.bt-state" ] || [ -f "$T/sleepd.bt-state.restoring" ]; }; then
++	log "supervisor: restoring Bluetooth snapshot after the Android restore ($(cat "$T/sleepd.bt-state" 2>/dev/null))"
++	timeout 90 sh "$T/fedora-bt-quiet.sh" restore
++fi
