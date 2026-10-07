@@ -36,7 +36,7 @@ psm() { inch timeout 10 gdbus call --session --dest org.gnome.Mutter.DisplayConf
 	--method org.freedesktop.DBus.Properties.Set org.gnome.Mutter.DisplayConfig PowerSaveMode "<int32 $1>" >> "$L" 2>&1; }
 unblank() { inch timeout 10 gdbus call --session --dest org.gnome.Shell --object-path /org/fedoratab/ScreenBlank \
 	--method org.fedoratab.ScreenBlank.Unblank >> "$L" 2>&1; }
-cleanup() { echo 0 > $RTC/wakealarm; [ "$(cat $DPMS)" = On ] || { resolve; psm 0; }; }
+cleanup() { echo 0 > $RTC/wakealarm; [ "$(cat $DPMS)" = On ] || { resolve && psm 0; }; }
 
 log "start gs=$GS secs=$SECS dpms=$(cat $DPMS) wk=$(timeout 3 grep -o 'CRTC0 wk active:[01]' /proc/mtkfb) success=$(cat $S/success) fail=$(cat $S/fail)"
 [ -n "$(cat $RTC/since_epoch)" ] || { log "no rtc since_epoch, abort"; exit 1; }
@@ -126,7 +126,7 @@ fi
 if [ "$UNBLANK_ON_WAKE" = 1 ]; then
 	# a power-key wake is followed by a Toggle from fake_sessionmanager; let it land first so our Unblank cannot be undone by it
 	if [ "$PWRWAKE" = 1 ]; then
-		w=0; while [ "$(pwcount)" = "$PW0" ] && [ $w -lt 12 ]; do sleep 0.25; w=$((w + 1)); done
+		w=0; while [ "$(pwcount)" = "$PW0" ] && [ $w -lt 20 ]; do sleep 0.25; w=$((w + 1)); done
 		sleep 0.3
 	fi
 	# unblank only if still blanked (a power Toggle may already have done it)

@@ -16,16 +16,33 @@ STATEF=$T/sleepd.blank
 STOP=$T/sleepd.stop
 LOCK=$T/sleepd.lock
 SETTLE=${SLEEPD_SETTLE:-4}
+setstate() { echo "$1" > "$STATEF.n" && mv "$STATEF.n" "$STATEF"; }
 log() { echo "$(date +%T) sleepd: $*" >> "$L"; }
 
-mkdir "$LOCK" 2>/dev/null || { log "already running (lock $LOCK), exit"; exit 1; }
+if ! mkdir "$LOCK" 2>/dev/null; then
+	op=$(cat "$LOCK/pid" 2>/dev/null)
+	if [ -n "$op" ] && kill -0 "$op" 2>/dev/null && grep -q fedora-sleepd "/proc/$op/cmdline" 2>/dev/null; then
+		log "already running (pid $op), exit"; exit 1
+	fi
+	log "stale lock (pid '$op') removed"
+	rm -rf "$LOCK"; mkdir "$LOCK" 2>/dev/null || { log "cannot take lock, exit"; exit 1; }
+fi
+echo $$ > "$LOCK/pid"
 rm -f "$STOP"
 GS=""
 for p in $(pgrep -x gnome-shell); do [ "$(readlink /proc/$p/root)" = "$R" ] && GS=$p; done
-[ -n "$GS" ] || { log "no gnome-shell, exit"; rmdir "$LOCK"; exit 1; }
+[ -n "$GS" ] || { log "no gnome-shell, exit"; rm -rf "$LOCK"; exit 1; }
+resolve() {
+	GS=""
+	for p in $(pgrep -x gnome-shell); do [ "$(readlink /proc/$p/root)" = "$R" ] && GS=$p; done
+	[ -n "$GS" ] || return 1
+	XR=$(tr '\0' '\n' < /proc/$GS/environ | grep "^XDG_RUNTIME_DIR=" | cut -d= -f2-)
+	DB=$(tr '\0' '\n' < /proc/$GS/environ | grep "^DBUS_SESSION_BUS_ADDRESS=" | cut -d= -f2-)
+	[ -n "$XR" ] && [ -n "$DB" ]
+}
 envv() { tr '\0' '\n' < /proc/$GS/environ | grep "^$1=" | cut -d= -f2-; }
 XR=$(envv XDG_RUNTIME_DIR); DB=$(envv DBUS_SESSION_BUS_ADDRESS)
-[ -n "$XR" ] && [ -n "$DB" ] || { log "no bus env, exit"; rmdir "$LOCK"; exit 1; }
+[ -n "$XR" ] && [ -n "$DB" ] || { log "no bus env, exit"; rm -rf "$LOCK"; exit 1; }
 inch() { runcon u:r:untrusted_app:s0 nsenter -t "$GS" -m -- chroot "$R" /usr/bin/env PATH=/usr/bin:/usr/sbin HOME=/root XDG_RUNTIME_DIR="$XR" DBUS_SESSION_BUS_ADDRESS="$DB" "$@"; }
 getblank() { inch timeout 5 gdbus call --session --dest org.gnome.Shell --object-path /org/fedoratab/ScreenBlank \
 	--method org.freedesktop.DBus.Properties.Get org.fedoratab.ScreenBlank Blanked 2>/dev/null; }
@@ -36,18 +53,18 @@ psm0() { inch timeout 10 gdbus call --session --dest org.gnome.Mutter.DisplayCon
 cleanup() {
 	for p in $(pgrep -f 'gdbus monitor --session --dest org.gnome.Shell'); do kill -9 "$p" 2>/dev/null; done
 	kill -9 "$MON" 2>/dev/null
-	rmdir "$LOCK" 2>/dev/null
+	rm -rf "$LOCK" 2>/dev/null
 }
 trap cleanup EXIT
 trap '' HUP
 trap 'exit 0' INT TERM
 
 B=$(getblank)
-case "$B" in *true*) echo 1 > "$STATEF";; *false*) echo 0 > "$STATEF";; *) log "cannot read Blanked ($B), exit"; exit 1;; esac
+case "$B" in *true*) setstate 1;; *false*) setstate 0;; *) log "cannot read Blanked ($B), exit"; exit 1;; esac
 ( inch gdbus monitor --session --dest org.gnome.Shell --object-path /org/fedoratab/ScreenBlank 2>/dev/null | while read -r line; do
 	case "$line" in
-		*"'Blanked': <true>"*) echo 1 > "$STATEF";;
-		*"'Blanked': <false>"*) echo 0 > "$STATEF";;
+		*"'Blanked': <true>"*) setstate 1;;
+		*"'Blanked': <false>"*) setstate 0;;
 	esac
 done ) &
 MON=$!
@@ -63,17 +80,18 @@ while [ ! -f "$STOP" ]; do
 		read -r st < "$STATEF"
 		[ "$st" = 1 ] || continue
 		# fresh authoritative read (the monitor may have missed an event or died)
-		case "$(getblank)" in *true*) ;; *) log "fresh Blanked read is not true -> not sleeping"; echo 0 > "$STATEF"; continue;; esac
+		case "$(getblank)" in *true*) ;; *) log "fresh Blanked read is not true -> not sleeping"; setstate 0; continue;; esac
 		t0=$(date +%s)
 		log "screen blanked -> starting sleep engine"
 		SLEEP_STATE_FILE="$STATEF" UNBLANK_ON_WAKE=1 sh $T/fedora-suspend-dpms.sh 30 -1
 		rc=$?
 		dt=$(( $(date +%s) - t0 ))
 		log "sleep engine returned rc=$rc after ${dt}s"
+		if [ "$rc" != 2 ] && [ "$(cat $DPMS)" != On ]; then log "engine rc=$rc but dpms=$(cat $DPMS) -> forcing PowerSaveMode 0"; resolve && psm0; sleep 1; [ "$(cat $DPMS)" = On ] || rc=2; fi
 		if [ "$rc" = 2 ]; then
 			log "!!! engine says the display did not come back; retrying PowerSaveMode 0 every 5 s until dpms=On"
 			n=0
-			while [ "$(cat $DPMS)" != On ] && [ $n -lt 60 ]; do psm0; sleep 5; n=$((n + 1)); done
+			while [ "$(cat $DPMS)" != On ] && [ $n -lt 60 ]; do resolve && psm0; sleep 5; n=$((n + 1)); done
 			log "dpms=$(cat $DPMS) after $n retries; exiting daemon (needs a manual restart)"
 			exit 1
 		fi
