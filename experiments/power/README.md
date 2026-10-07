@@ -25,3 +25,7 @@ Samsung's kernel source explains the failure: the MediaTek DRM PM notifier block
 Live result (Oct 7): with the guard, the panic chord works while the tablet sleeps. VOL UP (`gpio-keys`) wakes it (wake reason `255 Volume_Up`), the guard sees both keys held and ends the sleep, and the normal chord watcher then ends the session. VOL DOWN alone is not a wake source. The power-button wake path is not verified yet.
 
 Live result (Oct 7): the power button wakes the sleeping tablet. Wake reason `306 rcs_irq` (the PMIC interrupt line; the `mtk-pmic-keys` IRQs count the press and release), reproduced twice. A combined reason such as `44 A96T3X6;306 rcs_irq` must be checked against user-wake reasons before benign ones, otherwise the press is swallowed by the grip-sensor pattern. Still open: wiring the power key into the sleep flow, the 1–2 s modem/audio-DSP wake cadence, a battery comparison, and keyboard-cover behaviour with the display off.
+
+## Sleep daemon (experimental, not live-tested yet)
+
+`fedora-sleepd.sh` follows the screen-blank state (power button / cover), waits a few seconds after the screen blanks, then runs `fedora-suspend-dpms.sh` (display off first, then an s2idle loop with a per-cycle key-state guard). Any user wake (power, VOL UP, a held key, cover) restores the display and unblanks; the daemon will not sleep again until the screen has been seen unblanked. It must be started by hand inside a live session. Because the shell defers signals, a sleeping daemon can only be stopped after a wake (stop file `/data/local/tmp/sleepd.stop`).
