@@ -106,7 +106,7 @@ while :; do
 		# user-wake reasons FIRST (a combined reason like "A96T3X6;rcs_irq" must not be swallowed by a benign pattern):
 		# rcs_irq = PMIC interrupt line (power key / PMIC events), Volume_Up = gpio-keys VOL UP
 		*rcs_irq*|*Volume*|*pmic*|*pwrkey*) case "$R1" in *rcs_irq*|*pmic*|*pwrkey*) PWRWAKE=1;; esac; log "user wake reason [$R1] -> ending sleep"; break;;
-		*CCIF_AP_DATA0*|*A96T3X6*|*vcp_mboxdev*|*MBOX_SCP_ISR*|*adsp_mailbox*|*mailbox*|*alarmtimer*|*mt6685-rtc*|"") ;;
+		*CCIF_AP_DATA0*|*A96T3X6*|*vcp_mboxdev*|*gpueb_mboxdev*|*mboxdev*|*MBOX_SCP_ISR*|*adsp_mailbox*|*mailbox*|*spm-irq*|*alarmtimer*|*mt6685-rtc*|"") ;;  # spm-irq = SPM system-timer wake (R12_SYSTIMER_EVENT_B), gpueb/vcp/adsp = on-chip mailboxes
 		*) log "non-benign wake [$R1] -> ending sleep"; break;;
 	esac
 	if [ "$TOTAL" -ge 0 ]; then

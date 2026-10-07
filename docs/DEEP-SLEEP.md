@@ -34,7 +34,8 @@ Engine per-cycle guards: key state before blanking, before **every** `echo mem`,
 | `44 A96T3X6` | grip sensor (fires when the tablet is held) | keep sleeping |
 | `306 rcs_irq` | **PMIC interrupt line = POWER key** (`spmi-pmic-irq 48/51 mtk-pmic-keys`, +1 per edge) | user wake |
 | `255 Volume_Up` | **VOL UP** (`gpio-keys`) | user wake |
-| `707 spm-irq` | unknown (0.0006 s immediate wake) | user wake (fail-safe) |
+| `707 spm-irq` | SPM system-timer wake (not a person) | keep sleeping |
+| `-1 … IRQ 599 gpueb_mboxdev` | GPU EB mailbox | keep sleeping |
 A combined reason such as `44 A96T3X6;306 rcs_irq` once hid a power press behind the benign grip pattern → user-wake patterns are tested first. Device-tree facts: VOL UP and POWER have `wakeup-source`; VOL DOWN (PMIC `home` node, code 114) does **not**, so the chord wakes the tablet through VOL UP.
 
 ## Live test log (all 2026-10-07)
@@ -46,6 +47,9 @@ A combined reason such as `44 A96T3X6;306 rcs_irq` once hid a power press behind
 * 09:22 chord with the daemon running: worked; the tester was already holding the chord when the screen blanked, so the engine's key precheck aborted before sleeping (rc 1), daemon exited when gnome-shell went away, lock removed, no leftover processes.
 * 09:35–09:37 with the **Book Cover Keyboard attached**: types before sleep, 26 s sleep, power wake, types after wake, no popup/beep; a keyboard key does **not** wake the tablet (expected: not a wake source).
 * Cover (hall) test: **not valid** — the tester had already blanked the screen with the power button, and the switch probe (`swprobe.py`, EVIOCGSW poll) saw no change in a 30 s window; `fake_logind` has never logged a `book cover closed/opened` line (flagged in September). Still open.
+
+## Bug found 2026-10-07 ~11:20 — "it keeps turning on by itself" (FIXED)
+Symptom: after sleeping with the power button the display kept coming back on without any press. Cause: the engine treats every wake reason not on its benign list as a user wake (fail-safe). `707 spm-irq` (a system-timer wake; 4 occurrences, ending sleeps after 11 s / 68 s / 131 s / 251 s) and `gpueb_mboxdev` (2 occurrences) were not on the list, so the engine ended the sleep, turned the display on and unblanked. Evidence: `dmesg` `suspend wake up by R12_SYSTIMER_EVENT_B … Resume caused by IRQ 707, spm-irq`. Fix: `*spm-irq*|*mboxdev*|*gpueb*` added to the benign list (user-wake patterns are still tested first, so POWER `rcs_irq` / VOL UP `Volume_Up` and the key-state guard are unaffected). Engine md5 `7b5cedfd…` (backup `fedora-suspend-dpms.sh.pre-spmirq`). Verified live: 5+ minutes asleep, a `spm-irq` wake at 11:33:47 ridden through, no self-wake. Lesson: any new unknown wake reason will end sleep until classified — check `sleepd.log` / `suspend-test.log` (`non-benign wake [...]`) and `dmesg` (`wake up by R12_…`) before allowlisting; never allowlist a reason that could be a button.
 
 ## Audit trail (what each fresh-agent pass caught)
 1. Helper A–C: alarm-armed check, trap handling, restore-on-failure.
