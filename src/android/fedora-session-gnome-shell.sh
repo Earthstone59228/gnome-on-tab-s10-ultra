@@ -14,6 +14,22 @@ T=/data/local/tmp
 HB=$T/.fedora-session-gnome-shell-hb
 LOG=$T/fedora-session-gnome-shell.log
 log() { echo "$(date) $*" >> "$LOG"; }
+# 2026-10-04 cooldown: Android must have run COOL_S seconds since system_server last (re)started before SF is
+# stopped (a session started 27 s after the previous restore killed system_server: Wallpaper onServiceConnected ->
+# SurfaceControl DEAD_OBJECT with SF stopped). Fail-open if the age cannot be read. Bypass: touch $T/skip-cooldown
+# or pass "nocool" as 2nd arg. Only STARTING is delayed; the in-session panic chord is untouched.
+COOL_S=300
+COOL_MAX=1200
+CPID=$T/.fedora-cooldown.pid
+# Posting as uid 0 fails ("root" is not a package); runas (static helper, runas.c) drops to the shell uid first.
+notify() { runcon u:r:shell:s0 "$T/runas" 2000 2000 /system/bin/cmd notification post -t "Fedora GNOME" gnome_session "$1" >/dev/null 2>&1; }
+android_age() {
+	ss=$(pidof system_server | cut -d" " -f1)
+	[ -n "$ss" ] || return 1
+	st=$(sed "s/.*) //" /proc/$ss/stat 2>/dev/null | cut -d" " -f20)
+	up=$(cut -d. -f1 /proc/uptime)
+	[ -n "$st" ] && [ -n "$up" ] && echo $((up - st / 100))
+}
 # pkill -x does not match sfsentinel on this Android (returns 1 with the process alive); kill by pid instead
 kill_sentinel() { for _sp in $(pidof sfsentinel 2>/dev/null); do kill -9 "$_sp" 2>/dev/null; done; }
 # Same chroot-scoped kill as fedora-restore.sh: never touches Android/Termux
@@ -54,11 +70,42 @@ kill_compositors() {
 	return 1
 }
 
+# ---------------- cooldown path (detached waiter, then starts the session) ----------------
+if [ "$1" = "cool" ]; then
+	MINS=$2
+	echo $$ > "$CPID"
+	rm -f "$T/cancel-gnome"
+	waited=0
+	log "cooldown: waiting for Android to settle (up to ${COOL_S}s since system_server start; cancel: touch $T/cancel-gnome)"
+	while :; do
+		if [ -e "$T/cancel-gnome" ]; then
+			rm -f "$T/cancel-gnome" "$CPID"; log "cooldown: cancelled"; notify "GNOME session start cancelled"; exit 0
+		fi
+		[ -e "$T/skip-cooldown" ] && break
+		age=$(android_age)
+		{ [ -z "$age" ] || [ "$age" -ge "$COOL_S" ]; } && break
+		if [ "$waited" -ge "$COOL_MAX" ]; then log "cooldown: gave up waiting after ${waited}s - starting anyway"; break; fi
+		sleep 2
+		waited=$((waited + 2))
+		# refresh the notification roughly every minute (same tag = replaced, not stacked)
+		[ $((waited % 60)) = 0 ] && notify "GNOME session starts in about $(( (COOL_S - age + 59) / 60 )) min (letting Android settle)"
+	done
+	rm -f "$CPID"
+	log "cooldown: done after ${waited}s - starting session"
+	exec sh "$0" "$MINS" nocool
+fi
+
+# Both launcher and direct supervisor invocation require hash-pinned runtime admission.
+sh "$T/fedora-session-ime.sh" launch-check || { log "IME runtime admission missing or stale; session refused"; exit 1; }
+
 # ---------------- launcher path (default) ----------------
 # Argument is MINUTES, not seconds (same units/reasoning as fedora-session-gpu-test.sh).
 if [ "$1" != "sup" ]; then
 	MINS=${1:-2}
 	case "$MINS" in ''|*[!0-9]*) MINS=2;; esac
+	NOCOOL=0
+	[ "$2" = nocool ] && NOCOOL=1
+	[ -e "$T/skip-cooldown" ] && NOCOOL=1
 	if ! grep -q '^defex_off ' /proc/modules; then
 		log "prereq: defex_off NOT loaded — aborting (SF untouched)"; echo "prereq fail: defex_off not loaded (run fedora-enter.sh)"; exit 1
 	fi
@@ -95,6 +142,9 @@ if [ "$1" != "sup" ]; then
 	if [ ! -f "$T/fedora-android-settings.sh" ]; then
 		log "prereq: fedora-android-settings.sh missing — aborting (SF untouched)"; echo "prereq fail: fedora-android-settings.sh"; exit 1
 	fi
+	if [ ! -x "$T/fedora-session-ime.sh" ] || [ -e "$T/.fedora-session-ime" ] || [ -e "$T/.fedora-session-ime.tmp" ]; then
+		log "prereq: IME helper missing or earlier IME recovery pending — aborting before new supervisor"; exit 1
+	fi
 	# audit F04: everything the recovery path needs must exist BEFORE SurfaceFlinger is ever stopped
 	if [ ! -x "$R/usr/local/bin/mastercheck" ]; then
 		log "prereq: $R/usr/local/bin/mastercheck missing/not executable (restore cannot test DRM master) — aborting (SF untouched)"; echo "prereq fail: mastercheck"; exit 1
@@ -102,6 +152,23 @@ if [ "$1" != "sup" ]; then
 	if [ ! -x "$T/sfsentinel" ]; then
 		log "prereq: $T/sfsentinel missing/not executable (no SurfaceFlinger placeholder) — aborting (SF untouched)"; echo "prereq fail: sfsentinel"; exit 1
 	fi
+	if [ "$NOCOOL" = 0 ]; then
+		age=$(android_age)
+		if [ -n "$age" ] && [ "$age" -lt "$COOL_S" ]; then
+			cp=$(cat "$CPID" 2>/dev/null)
+			if [ -n "$cp" ] && tr "\0" " " < /proc/$cp/cmdline 2>/dev/null | grep -q "fedora-session-gnome-shell"; then
+				echo "cooldown already pending (cancel: touch $T/cancel-gnome)"; exit 0
+			fi
+			remain=$((COOL_S - age))
+			setsid nohup sh "$0" cool "$MINS" </dev/null > "$T/fedora-cooldown.log" 2>&1 &
+			echo "cooldown: Android up only ${age}s, session starts in ~${remain}s (skip: touch $T/skip-cooldown, cancel: touch $T/cancel-gnome)"
+			log "launcher: cooldown ${remain}s (android age ${age}s), waiter pid $!"
+			notify "GNOME session starts in about $(( (remain + 59) / 60 )) min (letting Android settle)"
+			exit 0
+		fi
+	fi
+	notify "GNOME session is starting - screen switches to GNOME in a few seconds"
+	sleep 4   # let the notification settle before SF is stopped (no Android window may animate then)
 	kill_compositors
 	setsid nohup sh "$0" sup "$MINS" </dev/null > "$T/fedora-supervisor-gnome-shell.log" 2>&1 &
 	echo "gnome-shell session started: time-box ${MINS}m, supervisor pid $!"
@@ -181,6 +248,9 @@ setsid nohup sh -c '
 			echo "$(date) watchdog: restore invocation returned rc=$wrc" >> "$LOG"
 			stale=0
 			if [ "$wrc" = 0 ]; then
+				sh "'"$T"'"/fedora-android-settings.sh restore final || wrc=1
+			fi
+			if [ "$wrc" = 0 ]; then
 				rm -f "$PH"
 				echo "$(date) watchdog: restore succeeded — watchdog done" >> "$LOG"
 				exit 0
@@ -205,9 +275,19 @@ abort_before_sf() {
 	[ -n "$PGPID" ] && { kill "$PGPID" 2>/dev/null; sleep 1; kill -9 "$PGPID" 2>/dev/null; PGPID=""; }
 	runcon u:r:shell:s0 /system/bin/cmd power set-wakelock release FULL_WAKE_LOCK >/dev/null 2>&1
 	runcon u:r:shell:s0 /system/bin/cmd power suppress-ambient-display fedora-session false >/dev/null 2>&1
-	sh "$T/fedora-android-settings.sh" restore
-	kill -9 "$WPID" 2>/dev/null
-	rm -f "$PH"
+	# A transient failure after selecting the inert IME must keep automatic recovery alive.
+	phase abort-before-sf 0
+	ar=0; recovered=0
+	while [ "$ar" -lt 3 ]; do
+		if sh "$T/fedora-android-settings.sh" restore final; then recovered=1; break; fi
+		ar=$((ar + 1)); sleep 2
+	done
+	if [ "$recovered" = 1 ]; then
+		kill -9 "$WPID" 2>/dev/null
+		rm -f "$PH"
+	else
+		log "supervisor: pre-SF settings/IME restore failed; originals and watchdog retained for recovery"
+	fi
 	exit 1
 }
 
@@ -230,7 +310,9 @@ abort_before_sf() {
 # fedora-restore.sh). Android auto-brightness off for the session: GNOME owns the panel backlight now, and two
 # controllers writing /sys/class/backlight/panel made GNOME's slider jump (P.1). Timeout max: stayon only
 # covers "plugged in", so an unplugged session would otherwise hit Android's idle screen-off.
+[ -x "$T/fedora-session-ime.sh" ] || abort_before_sf "session IME helper missing"
 sh "$T/fedora-android-settings.sh" save || abort_before_sf "could not save/apply the protective Android settings (rotation, idle, crash dialogs)"
+sh "$T/fedora-session-ime.sh" prepare || abort_before_sf "could not prepare inert Android IME"
 # 2026-09-27 ROOT CAUSE of the ColorFade crash loops (sessions #2, #4): `svc power stayon true` never worked from
 # this root context — svc runs app_process, which fails here with CANNOT LINK libnativeloader.so — so nothing
 # held Android awake: after the wake key it fell back into Doze/AOD ~4 s later, i.e. right after SF was stopped.
@@ -384,15 +466,18 @@ if [ ! -e "$T/no-audio-bridge" ] && [ -f "$TX_AUDIO" ]; then
 	else
 		log "supervisor: WARNING Termux audio bridge NOT answering after $ab_try try/tries — audio will be silent"
 	fi
-	# 2026-09-27 UN-AUDITED: Android STREAM_MUSIC speaker volume was 2/15 mid-session (the entire PulseAudio
-	# chain was 100% — the attenuation was Android-side, and the rocker is grabbed by GNOME during a session,
-	# so Android media volume is unreachable from GNOME). Pin it to max every session; persists in Android
-	# otherwise. Pure AudioManager service call (cmd audio): no UI, no window activity, safe with SF stopped.
+	# 2026-09-27: Android STREAM_MUSIC was 2/15 mid-session (the PulseAudio chain is 100%, the attenuation is Android-side,
+	# and the rocker is grabbed by GNOME so Android media volume is unreachable from GNOME). Pin it every session.
+	# 2026-10-06 (user): pin to ~50% (8/15) instead of max so GNOME sound level is stable and not painfully loud.
+	# Override: echo N > /data/local/tmp/fedora-media-volume (0-15). Pure AudioManager service call, safe with SF stopped.
+	av_want=$(tr -dc 0-9 < "$T/fedora-media-volume" 2>/dev/null)
+	case "$av_want" in ''|*[!0-9]*) av_want=8;; esac
+	[ "$av_want" -gt 15 ] && av_want=15
 	av_now=$(runcon u:r:shell:s0 /system/bin/cmd audio get-stream-volume 3 2>/dev/null | awk 'END{print $NF}' | tr -dc 0-9)
-	case "$av_now" in ''|*[!0-9]*) av_now=0;; esac
-	if [ "$av_now" -lt 15 ]; then
-		runcon u:r:shell:s0 /system/bin/cmd audio set-device-volume 3 15 2 >/dev/null 2>&1
-		log "supervisor: Android media volume pinned to 15/15 (was $av_now)"
+	case "$av_now" in ''|*[!0-9]*) av_now=-1;; esac
+	if [ "$av_now" != "$av_want" ]; then
+		runcon u:r:shell:s0 /system/bin/cmd audio set-device-volume 3 "$av_want" 2 >/dev/null 2>&1
+		log "supervisor: Android media volume set to $av_want/15 (was $av_now)"
 	fi
 	# 2026-09-28 (doc 11 §AE): mid-session audio watchdog. Termux module-aaudio-sink can deadlock in AAudioStream_close
 	# (seen live 09:51:27: daemon listens on 4713 but never answers -> silent for the rest of the session). Every 20 s
@@ -468,6 +553,7 @@ if [ "$tst" != 1 ]; then
 fi
 [ "$tw" -gt 0 ] && log "supervisor: waited for Android toast(s) to clear before stopping SF ($tw checks + 1 s settle)"
 phase sf-stopped 150
+sh "$T/fedora-session-ime.sh" verify || abort_before_sf "inert Android IME safety state changed"
 runcon_shell stop surfaceflinger
 log "supervisor: surfaceflinger stopped (panel vrr=[$(cat /sys/class/lcd/panel/vrr 2>/dev/null)])"
 
@@ -541,7 +627,7 @@ while [ "$sw" -lt 6 ]; do
 done
 if ! kill -0 "$SFSENTINEL_PID" 2>/dev/null || ! runcon u:r:shell:s0 /system/bin/service check SurfaceFlinger 2>/dev/null | grep -q ": found"; then
 	log "supervisor: ABORT — sfsentinel placeholder not running/registered after ${sw}s; handing Android back (HWC is still up, so SurfaceFlinger is simply started again — the shared restore cannot be used here: HWC holds DRM master)"
-	kill -9 "$WPID" 2>/dev/null
+	phase restoring 900
 	[ -n "$AWPID" ] && kill -9 "$AWPID" 2>/dev/null
 	[ -n "$IHON" ] && { sh "$T/input-hide.sh" off; IHON=""; }
 	sfok=0
@@ -554,9 +640,8 @@ if ! kill -0 "$SFSENTINEL_PID" 2>/dev/null || ! runcon u:r:shell:s0 /system/bin/
 		sleep 2
 	done
 	if [ "$sfok" != 1 ]; then
-		# keep the placeholder (fail-fast names) and the phase file out of the way; the watchdog is already gone, so say so loudly
+		# Keep the existing placeholder path and watchdog recovery armed until Android returns.
 		log "supervisor: sentinel-abort: SurfaceFlinger did NOT start after 3 attempts — running the shared restore (it stops HWC, retakes DRM master, restarts HWC + SF); placeholder kept until SF is up"
-		rm -f "$PH"
 		sh "$T/fedora-restore.sh"
 		log "supervisor: sentinel-abort: shared restore rc=$? (sf=$(getprop init.svc.surfaceflinger)); hardware fallback POWER + VOL DOWN ~10 s"
 		exit 1
@@ -576,7 +661,7 @@ if ! kill -0 "$SFSENTINEL_PID" 2>/dev/null || ! runcon u:r:shell:s0 /system/bin/
 	st=0
 	while [ -f "$T/.fedora-android-settings" ] && [ "$st" -lt 6 ]; do
 		sleep 5
-		sh "$T/fedora-android-settings.sh" restore && break
+		sh "$T/fedora-android-settings.sh" restore final && break
 		st=$((st + 1))
 	done
 	if [ -f "$T/.wifi-svc-disabled" ]; then
@@ -593,7 +678,12 @@ if ! kill -0 "$SFSENTINEL_PID" 2>/dev/null || ! runcon u:r:shell:s0 /system/bin/
 		rm -f "$T/.wifi-svc-disabled"
 	fi
 	[ -n "$PGPID" ] && { kill "$PGPID" 2>/dev/null; sleep 1; kill -9 "$PGPID" 2>/dev/null; }
-	rm -f "$PH"
+	if [ ! -e "$T/.fedora-session-ime" ] && [ ! -e "$T/.fedora-android-settings" ]; then
+		kill -9 "$WPID" 2>/dev/null
+		rm -f "$PH"
+	else
+		log "supervisor: early post-SF recovery incomplete; snapshots and watchdog retained"
+	fi
 	log "supervisor: sentinel-abort recovery done (sf=$(getprop init.svc.surfaceflinger) zygote=$(getprop init.svc.zygote))"
 	exit 1
 fi
@@ -797,10 +887,10 @@ pkill -9 -f scid=6d696330 2>/dev/null   # 2026-09-28 (§AE): Android mic server,
 grep " $R/run/media/root/" /proc/mounts | awk '{print $2}' | while read -r m; do sync; umount -l "$m" 2>/dev/null && log "supervisor: drive bind $m released"; done
 # audit F02: the sfsentinel placeholder is NOT killed here. It must stay up while HWC/SF are restarted; the shared
 # restore dismisses it only after the real SurfaceFlinger is confirmed running (and keeps it if that fails).
-log "supervisor: dismissing watchdog ($WPID)"
-kill -9 "$WPID" 2>/dev/null
-log "supervisor: watchdog dismissed"
-rm -f "$PH"
+# Retain watchdog through IME/settings final verification, including zygote restart.
+# A live supervisor owns restore; a dead or hung one leaves recovery to the watchdog.
+phase restoring 900
+log "supervisor: watchdog retained until settings and IME recovery verified"
 log "supervisor: invoking shared restore (F14)"
 # 2026-09-26 audit #3: an aborted restore (master held / HWC down) used to be final. Retry it; each attempt
 # escalates on its own (kills chroot card0 holders, restarts HWC).
@@ -846,7 +936,7 @@ fi
 st=0
 while [ -f "$T/.fedora-android-settings" ] && [ "$st" -lt 6 ]; do
 	sleep 5
-	sh "$T/fedora-android-settings.sh" restore && break
+	sh "$T/fedora-android-settings.sh" restore final && break
 	st=$((st + 1))
 done
 
@@ -878,4 +968,13 @@ if [ "$(getprop init.svc.surfaceflinger)" = "running" ]; then
 	[ -n "$PGPID" ] && { kill "$PGPID" 2>/dev/null; sleep 1; kill -9 "$PGPID" 2>/dev/null; log "supervisor: pogo ghost removed (end of supervisor)"; }
 else
 	log "supervisor: SurfaceFlinger not running at the end — leaving the pogo ghost / input hide to remove themselves"
+fi
+
+# Failed final verification must retain automatic recovery after this supervisor exits.
+if [ ! -e "$T/.fedora-session-ime" ] && [ ! -e "$T/.fedora-android-settings" ]; then
+    kill -9 "$WPID" 2>/dev/null
+    rm -f "$PH"
+    log "supervisor: recovery snapshots clear; watchdog dismissed"
+else
+    log "supervisor: recovery pending; snapshots and watchdog retained"
 fi

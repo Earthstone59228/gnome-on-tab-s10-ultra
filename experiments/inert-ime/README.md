@@ -22,3 +22,14 @@ Live bugs the host tests and first audits missed (all fixed, now covered by on-d
   happen with SurfaceFlinger stopped.
 
 Signing: `export IME_KS_PASS=<local passphrase>` then `./build.sh`; the key stays in `private/`.
+
+## Manual recovery (no display / stuck session)
+Normal paths: panic chord, the watchdog, then POWER + VOL DOWN held ~10 s. If Android is back but the
+keyboard is wrong or `/data/local/tmp/.fedora-session-ime` still exists, as root:
+1. Stop retries: kill the watchdog (`.fedora-session-phase` names the supervisor) and remove
+   `.fedora-session-phase` only once Android's display is up.
+2. `sh /data/local/tmp/fedora-session-ime.sh restore final` (restores the saved keyboard settings and
+   deletes the snapshot), or by hand: `settings --user 0 put secure default_input_method <value of
+   .fedora-session-ime/default_input_method.value>`.
+3. Do not launch a new session while the log says "recovery pending".
+Full uninstall: `stage/rollback-dummy-ime.sh` (Android mode, no GNOME, no phase file).

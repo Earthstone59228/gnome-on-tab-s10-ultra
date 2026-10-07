@@ -21,8 +21,8 @@
 #                                           stopped" dialog -> addWindow -> SurfaceControl DEAD_OBJECT -> system_server
 #                                           dies and the session ends. With the dialog hidden, the same repeated MTP
 #                                           crashes are survived. Unset on the stock device (null), so restore deletes it.
-# restore (fedora-restore.sh after SF is back, and again by the supervisor after the zygote restart): put every value
-#   back (unset -> delete), verify it, and remove the snapshot only when all three verified. Idempotent.
+# restore [final] (fedora-restore.sh after SF is back = plain; the supervisor after the zygote restart = final): put every
+#   value back (unset -> delete), verify it; the snapshot is removed only by `restore final`. Idempotent.
 # A snapshot left behind by a session that never restored is kept and NOT overwritten (it holds the real originals).
 T=/data/local/tmp
 F=$T/.fedora-android-settings
@@ -73,7 +73,10 @@ save)
 	log "session values set and verified: brightness_mode=$(s get system screen_brightness_mode) screen_off_timeout=$(s get system screen_off_timeout) accelerometer_rotation=$(s get system accelerometer_rotation) hide_error_dialogs=$(s get global hide_error_dialogs)"
 	;;
 restore)
-	[ -f "$F" ] || exit 0
+	# IME snapshots have their own lifetime; apply even if settings snapshot is absent.
+	ime_rc=0
+	sh "$T/fedora-session-ime.sh" restore "$2" || ime_rc=1
+	[ -f "$F" ] || exit "$ime_rc"
 	ok=1
 	while read -r ns key val; do
 		[ -n "$key" ] || continue
@@ -81,15 +84,23 @@ restore)
 		now=$(s get "$ns" "$key")
 		if [ "$now" != "$val" ]; then ok=0; log "restore $ns $key: wanted '$val', reads '$now' (will retry)"; fi
 	done < "$F"
-	if [ "$ok" = 1 ]; then
-		rm -f "$F"
-		log "Android settings restored and verified"
+	if [ "$ok" = 1 ] && [ "$ime_rc" = 0 ]; then
+		# audit 2026-10-06: the supervisor restarts zygote right after fedora-restore.sh's restore, and the
+		# restored values did not survive that (every session since 09-27 re-snapshotted the SESSION values as
+		# "originals"). So a plain restore applies + verifies but KEEPS the snapshot; only `restore final`
+		# (the supervisor's post-zygote pass, or an abort before SF was touched) removes it.
+		if [ "$2" = final ]; then
+			rm -f "$F"
+			log "Android settings restored and verified (final, snapshot removed)"
+		else
+			log "Android settings restored and verified (snapshot kept until the post-zygote pass)"
+		fi
 	else
 		exit 1
 	fi
 	;;
 *)
-	echo "usage: $0 save|restore" >&2
+	echo "usage: $0 save|restore [final]" >&2
 	exit 2
 	;;
 esac
